@@ -1,0 +1,51 @@
+{
+  "name": "sign-wrap",
+  "version": "0.2.0",
+  "description": "Type and control your laptop without touching it.",
+  "license": "MIT",
+  "private": false,
+  "author": "Sign-Flow contributors",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GC-WORK11/sign-wrap.git"
+  },
+  "homepage": "https://sign-flow-eight.vercel.app",
+  "bugs": "https://github.com/GC-WORK11/sign-wrap/issues",
+  "keywords": [
+    "sign",
+    "gesture",
+    "linux",
+    "input",
+    "phone",
+    "mediapipe"
+  ],
+  "bin": {
+    "wrap": "bin/wrap"
+  },
+  "files": [
+    "bin/",
+    "server/",
+    "web/",
+    "app/AndroidManifest.xml",
+    "app/build.sh",
+    "app/src/",
+    "app/res/",
+    "README.md",
+    "LICENSE",
+    "LIMITATIONS.md",
+    "PRIVACY.md",
+    "SECURITY.md",
+    "THIRD_PARTY_NOTICES"
+  ],
+  "scripts": {
+    "wrap": "bin/wrap start",
+    "start": "bin/wrap start",
+    "pair": "bin/wrap pair",
+    "doctor": "bin/wrap doctor",
+    "stop": "bin/wrap stop",
+    "status": "bin/wrap status",
+    "tunnel": "bin/wrap tunnel",
+    "test:contribute": "node --test tests/contribute.test.mjs",
+    "test:kp": "node --test tests/kp-pack.test.mjs"
+  }
+}
