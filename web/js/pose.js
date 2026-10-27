@@ -149,7 +149,15 @@ export const Pose = {
 
       prog('model', 'loading the hand model (on-device, ~8 MB)');
       let lm = null, err = null;
-      for (const d of ['GPU', 'CPU']) {
+      // A software GL (SwiftShader, GPU-less VMs) makes the GPU
+      // delegate ~1 fps; try the CPU (XNNPACK) delegate first there.
+      let soft = false;
+      try {
+        const gl = document.createElement('canvas').getContext('webgl');
+        const ext = gl && gl.getExtension('WEBGL_debug_renderer_info');
+        soft = !!ext && /swiftshader|llvmpipe|software/i.test(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL));
+      } catch (e) {}
+      for (const d of (soft ? ['CPU', 'GPU'] : ['GPU', 'CPU'])) {
         try {
           lm = await L.createFromOptions(fs, {
             baseOptions: { modelAssetPath: DIR + MODEL, delegate: d },
