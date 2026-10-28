@@ -468,7 +468,8 @@ class BankOps(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             p = os.path.join(td, "signbank.json")
             b.save(p)
-            self.assertEqual(os.stat(p).st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual(os.stat(p).st_mode & 0o777, 0o600)
             b2 = sb.SignBank.load(p)
         self.assertEqual(b2.list(), b.list())
         self.assertEqual(b2.reject_threshold, b.reject_threshold)

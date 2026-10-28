@@ -2,18 +2,18 @@
 
 > Type and control your laptop without touching it.
 
-This file is for a coding agent running on the founder's Linux laptop. Use it to get the app running, fix small run errors, and help record the demo. Read it fully before you edit anything. Every command and path below was checked against `main`.
+This file is for a coding agent running on the founder's laptop (Linux, macOS or Windows). Use it to get the app running, fix small run errors, and help record the demo. Read it fully before you edit anything. Every command and path below was checked against `main`.
 
 ---
 
 ## 1. What the product is
 
-Sign-Flow pairs a phone with a Linux laptop over the local network.
+Sign-Flow pairs a phone with a laptop (Linux X11, macOS or Windows) over the local network.
 
 - **Composer:** on the phone you type text or attach an image, video or file. The daemon types or pastes it into the focused laptop window, or into a window you picked with `@`.
 - **Go Live:** the phone (or laptop) camera tracks hand landmarks in the browser. The user teaches personal signs (3 takes each), and performing a sign either types its bound phrase (Text mode) or fires its bound laptop action (Control mode).
 - **Privacy:** camera video never leaves the browser. Only 21-point hand landmarks per hand are sent to the laptop.
-- **Daemon:** standard-library Python only, with no pip installs and no build step. It drives X11 through `xdotool`, `xclip`, `xprop` and `wmctrl`. **There is no ydotool or Wayland path.**
+- **Daemon:** standard-library Python only, with no pip installs and no build step. On Linux it drives X11 through `xdotool`, `xclip`, `xprop` and `wmctrl` (**no ydotool or Wayland path**). On macOS and Windows it uses `server/act_platform.py`: osascript/System Events and `pbcopy` on macOS, PowerShell and user32 window messages on Windows.
 
 ```mermaid
 flowchart LR
@@ -28,14 +28,14 @@ flowchart LR
     EP[endpointer.py: segments motion and holds]
     SB[signbank.py: banded DTW match plus reject]
     OPS[signflow_ops.py: Text / Control semantics]
-    ACT[act_iface.py + act_linux.py + system_ctl.py]
-    INJ[serial inject queue: xdotool type, xclip paste]
+    ACT[act_iface.py + act_linux.py or act_platform.py + system_ctl.py]
+    INJ[serial inject queue: type and paste per OS]
   end
   C -- "POST /send, /send-image, /send-file" --> H
   MP -- "POST /live/kp (landmarks only, ~12 Hz)" --> H
   H --> INJ
   H --> EP --> SB --> OPS --> ACT
-  INJ --> X[Focused X11 window]
+  INJ --> X[Focused window: X11, macOS or Windows]
   ACT --> X
 ```
 
@@ -47,7 +47,10 @@ Auth: the pairing key is stored in `~/.config/wf/key` (mode 600). The app sends 
 
 | Path | What it does |
 |---|---|
-| `bin/wrap` | Bash CLI. It is the `npm link` target (`package.json` → `"bin": {"wrap": "bin/wrap"}`). `ROOT` is resolved with `readlink -f`, so the CLI always runs the copy it lives in. Subcommands: `start pair restart bridge stop status logs send install tunnel open doctor`. `bound_port()` (l.13) reads the real port from the log. `pair_card()` (l.24) prints the QR. `doctor` (l.~125) lists the dependencies. |
+| `bin/wrap.js` | `npm link` target (`package.json` → `"bin": {"wrap": "bin/wrap.js"}`). Runs `bin/wrap` with bash on Linux and macOS, `server/wrap_cli.py` on Windows. `bin/wrap.cmd` and `bin/wrap.ps1` are shims for cmd.exe and PowerShell. |
+| `server/wrap_cli.py` | The same CLI in stdlib Python (same subcommands, no curl). Used on Windows. |
+| `scripts/linux.sh`, `macos.sh`, `windows.sh` | Per-OS setup: check tools, `npm install`, start. Any CLI subcommand passes through, e.g. `scripts/macos.sh status`. `windows.sh` runs in Git Bash. |
+| `bin/wrap` | Bash CLI for Linux and macOS. `ROOT` is resolved with `readlink -f`, so the CLI always runs the copy it lives in. Subcommands: `start pair restart bridge stop status logs send install tunnel open doctor`. `bound_port()` (l.13) reads the real port from the log. `pair_card()` (l.24) prints the QR. `doctor` (l.~125) lists the dependencies. |
 | `bin/wf` | Legacy alias. |
 | `server/wfd.py` | The daemon (about 2.7k lines). Config env vars are at l.48-93. `list_windows()` l.173 (`wmctrl -lx`). `focus_window()` l.195. Serial inject queue l.213-228. `type_keystrokes`/`type_paste` l.230/237. `send_text` l.256. `send_image` l.302 (converts to PNG with `convert`). `stream_upload` l.362 (writes to `~/wf-uploads`). `live_reset` l.620. `route_gloss` l.964. `_on_segment` l.1118 (in Teach mode it stores an exemplar; when listening it matches). `live_kp` l.1449. `teach_begin`/`teach_end` l.1654/1682. `bank_put`/`bank_delete` l.1736/1881. Routes: `do_GET` l.2142, `do_POST` l.2287, `do_DELETE` l.2638. `serve()` l.2661 tries the port, then the next 11 ports. |
 | `server/endpointer.py` | Motion and hold segmenter. **Tunables are the `Endpointer.__init__` defaults at l.144-151**: `enter_v 1.5`, `exit_v 0.7`, `quiet_s 0.35`, `min_seg_s 0.20`, `max_seg_s 3.0`, `hold_s 0.45`, `hold_v 1.2`, `open_ratio 1.55`, `hold_end_s 0.5`, `min_hold_seg_s 0.6`. `PRESENCE_SCORE 0.25` is at l.44. wfd builds it with the defaults (wfd l.631 and l.1488), so edit the defaults here. |
@@ -56,6 +59,7 @@ Auth: the pairing key is stored in `~/.config/wf/key` (mode 600). The app sends 
 | `server/signflow_ops.py` | Session and mode semantics (Text, Control, observe). |
 | `server/act_iface.py` | Action contract, risk tiers and the focus guard (`verify_focus` l.606, `run` l.666). |
 | `server/act_linux.py` | X11 provider (xdotool, wmctrl, xprop, xrandr). |
+| `server/act_platform.py` | macOS and Windows provider (`CrossPlatformProvider`). wfd.py picks it when not on Linux. |
 | `server/system_ctl.py` | Volume, media, screenshot, lock, wifi and bluetooth actions (pactl/amixer, playerctl, scrot/maim/gnome-screenshot, nmcli, rfkill, brightnessctl, loginctl). Each one is optional and shows only if its tool exists. |
 | `server/macro.py` | Chained action steps (`kind: "macro"`). |
 | `server/record_action.py` | Teach by demonstration (`xinput test-xi2`). |
@@ -70,7 +74,7 @@ Auth: the pairing key is stored in `~/.config/wf/key` (mode 600). The app sends 
 | `web/js/quick.js` | The one-tap action tiles (`TILES` l.43). A tile appears only if the laptop reports its tool. |
 | `web/js/pose.js` | Loads the vendored landmarker and packs frames into 42 points. The score falls back to 1 when the landmarker gives no visibility (l.84). |
 | `web/js/settings.js`, `laptop.js`, `drawer.js`, `library.js` | Settings (Vibrate on send), laptop pane, side drawer, sign library. |
-| `web/sw.js` | Service worker. **`VERSION` is at l.15** (`wf-shell-v35`). Bump it on every web change. |
+| `web/sw.js` | Service worker. **`VERSION` is at l.15** (`wf-shell-v36`). Bump it on every web change. |
 | `web/css/compose.css` | Composer styles. The `.act` black pill is at about l.51-62. |
 | `web/vendor/mediapipe/` | Vendored MediaPipe Tasks Vision plus the model (Apache-2.0, see `NOTICE.md` and `MANIFEST`). Do not edit or remove it. |
 | `cloud/contribute/` | Cloudflare Worker scaffold for opt-in landmark samples. **Not deployed, and no endpoint is configured** (`/status` → `contribute_url: ""`). Leave it alone for the demo. |
@@ -80,7 +84,15 @@ Auth: the pairing key is stored in `~/.config/wf/key` (mode 600). The app sends 
 
 ---
 
-## 3. Setup on Linux
+## 3. Setup
+
+Per OS, the one-step path is the matching script: `scripts/linux.sh`, `scripts/macos.sh`, or `scripts/windows.sh` (Git Bash). Each checks tools, runs `npm install` and starts the daemon; `setup` skips the start, `check` only checks.
+
+- **macOS:** grant Accessibility to the terminal app (System Settings > Privacy & Security > Accessibility); Screen Recording only for the screenshot action. `doctor` checks python3, curl, osascript, pbcopy and sips.
+- **Windows:** typing uses window messages; nothing beyond Node.js, Python 3 and the built-in PowerShell. Allow Python through the firewall on private networks.
+- **Not yet verified end to end on macOS/Windows hardware:** volume, mute, brightness and lock (unit-tested with mocks only).
+
+### Linux
 
 **The session must be X11.** On the login screen pick "Ubuntu on Xorg" (or the equivalent). Check with `echo $XDG_SESSION_TYPE`, which must print `x11`.
 
@@ -294,7 +306,7 @@ If a sign fails on camera, cut and retake that shot. Don't narrate failures and 
 ## 9. Tests
 
 ```bash
-cd server && python3 -m unittest discover -s tests      # 242 tests, about 15 s; expect "OK (skipped=3, expected failures=1)"
+cd server && python3 -m unittest discover -s tests      # 333 tests, about 15 s; expect "OK" with 3 to 6 skips depending on the session and 1 expected failure
 cd .. && node --test tests/contribute.test.mjs tests/kp-pack.test.mjs   # 10 pass
 # single module:
 cd server && python3 -m unittest tests.test_endpointer -v

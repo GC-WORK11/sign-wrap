@@ -15,15 +15,18 @@
     "sign",
     "gesture",
     "linux",
+    "macos",
+    "windows",
     "input",
     "phone",
     "mediapipe"
   ],
   "bin": {
-    "wrap": "bin/wrap"
+    "wrap": "bin/wrap.js"
   },
   "files": [
     "bin/",
+    "scripts/",
     "server/",
     "web/",
     "app/AndroidManifest.xml",
@@ -38,14 +41,15 @@
     "THIRD_PARTY_NOTICES"
   ],
   "scripts": {
-    "wrap": "bin/wrap start",
-    "start": "bin/wrap start",
-    "pair": "bin/wrap pair",
-    "doctor": "bin/wrap doctor",
-    "stop": "bin/wrap stop",
-    "status": "bin/wrap status",
-    "tunnel": "bin/wrap tunnel",
+    "wrap": "node bin/wrap.js start",
+    "start": "node bin/wrap.js start",
+    "pair": "node bin/wrap.js pair",
+    "doctor": "node bin/wrap.js doctor",
+    "stop": "node bin/wrap.js stop",
+    "status": "node bin/wrap.js status",
+    "tunnel": "node bin/wrap.js tunnel",
     "test:contribute": "node --test tests/contribute.test.mjs",
-    "test:kp": "node --test tests/kp-pack.test.mjs"
+    "test:kp": "node --test tests/kp-pack.test.mjs",
+    "test": "cd server && python3 -m unittest discover -s tests"
   }
 }

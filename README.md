@@ -4,109 +4,276 @@ Type and control your laptop without touching it.
 
 Live site: https://sign-flow-eight.vercel.app
 
-Sign-Flow pairs your phone with your Linux laptop over your own network. Type or attach files on the phone and they land in the focused laptop window. Teach the phone camera a few signs of your own, and performing a sign types a phrase or runs a laptop action.
+Sign-Flow pairs your phone with your laptop over your own network. Type or attach files on the phone and they land in the laptop window you choose. Teach the camera a few signs of your own, and performing a sign types a phrase or runs a laptop action.
 
-- The phone composer sends text, images, videos and files; they are typed or pasted into the focused window.
-- Go Live turns the phone camera into a personal sign controller. Teach a sign in three takes, bind it to a phrase or an action, and perform it to fire the binding.
-- Camera video never leaves the phone. Hand tracking runs in the browser and only hand landmark points are sent to the laptop.
+- The phone composer sends text, images, videos and files. They are typed or pasted into the focused window, or into an app you pick with `@`.
+- Go Live turns the camera into a personal sign controller. Teach a sign in three takes, bind it to a phrase or an action, and perform it to fire the binding.
+- Camera video never leaves the browser. Hand tracking runs on the device and only hand landmark points are sent to the laptop.
 
-The daemon is standard-library Python with no dependencies and no build step.
+The laptop side runs on Linux (X11), macOS and Windows. The daemon is standard-library Python with no pip installs and no build step.
+
+## Contents
+
+- [How it works](#how-it-works)
+- [Repository layout](#repository-layout)
+- [Quick start](#quick-start)
+- [Notes per OS](#notes-per-os)
+- [Pairing](#pairing)
+- [Using it](#using-it)
+- [CLI reference](#cli-reference)
+- [Tests](#tests)
+- [Limitations](#limitations)
+- [Licenses](#licenses)
+- [Roadmap](#roadmap)
+- [Security](#security)
+
+## How it works
+
+```mermaid
+flowchart LR
+    subgraph phone["Phone browser: web app (web/)"]
+        COMP["Composer<br/>text, image, video, file"]
+        PICK["@ picker<br/>choose the target app"]
+        LIVE["Go Live and Teach<br/>camera stays on the device"]
+        HAND["Hand landmarker<br/>vendored MediaPipe WASM"]
+        LIVE --> HAND
+    end
+
+    subgraph pair["Pairing"]
+        QR["QR code"]
+        CODE["8-character pair code"]
+        LAN["LAN link<br/>http://laptop-ip:8741/?k=..."]
+        KEY["Pairing key<br/>~/.config/wf/key, mode 600"]
+        QR --> KEY
+        CODE -->|"POST /pair"| KEY
+        LAN --> KEY
+    end
+
+    subgraph laptop["Laptop daemon: server/wfd.py"]
+        HTTP["HTTP API on :8741<br/>X-WF-Key on every request"]
+        INJ["Inject queue<br/>type, paste, files"]
+        EP["endpointer.py<br/>motion and hold segments"]
+        SB["signbank.py<br/>DTW match against your taught signs"]
+        OPS["signflow_ops.py<br/>Text or Control mode"]
+        GUARD["act_iface.py<br/>risk tiers, focus guard, confirm"]
+        SYS["system_ctl.py<br/>volume, media, screenshot, lock"]
+    end
+
+    subgraph backend["OS backend, chosen at start"]
+        LNX["Linux X11: act_linux.py<br/>xdotool, xclip, xprop, wmctrl"]
+        MAC["macOS: act_platform.py<br/>osascript and System Events, pbcopy"]
+        WIN["Windows: act_platform.py<br/>PowerShell and user32 window messages"]
+    end
+
+    APPS["Laptop apps<br/>editor, browser, chat, desktop"]
+
+    KEY -.->|"stored in the browser"| HTTP
+    COMP -->|"/send, /send-image, /send-file"| HTTP
+    PICK -->|"GET /windows"| HTTP
+    HAND -->|"/live/kp, landmarks only, about 12 Hz"| HTTP
+    HTTP --> INJ
+    HTTP --> EP --> SB
+    SB -->|"match under the reject bar"| OPS
+    SB -->|"no match"| NONE["nothing fires"]
+    OPS -->|"Text: type the bound phrase"| INJ
+    OPS -->|"Control: run the bound action"| GUARD
+    GUARD --> SYS
+    INJ --> LNX
+    INJ --> MAC
+    INJ --> WIN
+    GUARD --> LNX
+    GUARD --> MAC
+    GUARD --> WIN
+    SYS --> LNX
+    SYS --> MAC
+    SYS --> WIN
+    LNX --> APPS
+    MAC --> APPS
+    WIN --> APPS
+```
+
+Hand landmarks are found in the browser. Matching a landmark sequence against your taught signs happens in the daemon on the laptop, so the bank of signs never leaves your machine.
+
+## Repository layout
+
+```
+sign-wrap/
+├── bin/
+│   ├── wrap                 CLI for Linux and macOS (bash)
+│   ├── wrap.js              npm entry: runs bin/wrap on Linux and macOS, server/wrap_cli.py on Windows
+│   ├── wrap.cmd             Windows shim for cmd.exe
+│   └── wrap.ps1             Windows shim for PowerShell
+├── scripts/
+│   ├── linux.sh             setup and launch on Linux
+│   ├── macos.sh             setup and launch on macOS
+│   └── windows.sh           setup and launch on Windows (Git Bash)
+├── server/
+│   ├── wfd.py               daemon: HTTP, pairing, send, teach, live, actions
+│   ├── wrap_cli.py          the same CLI in pure Python, used on Windows
+│   ├── act_iface.py         action contract, risk tiers, focus guard
+│   ├── act_linux.py         Linux X11 backend
+│   ├── act_platform.py      macOS and Windows backend
+│   ├── system_ctl.py        system actions: volume, media, screenshot, lock, wifi
+│   ├── signbank.py          taught-sign bank: normalize, banded DTW, reject
+│   ├── endpointer.py        motion segmentation
+│   ├── signflow_ops.py      Text and Control mode semantics
+│   ├── packs.py             ready-made Teach packs
+│   ├── qrcodegen.py         vendored QR generator
+│   ├── qrprint.py           terminal QR printer
+│   └── tests/               unit and contract tests
+├── web/                     phone web app: composer, Go Live, Teach, settings
+│   └── vendor/mediapipe/    vendored hand landmarker (no CDN)
+├── app/                     optional Android shell for the web app
+├── cloud/contribute/        Cloudflare Worker for opt-in samples (not deployed)
+├── landing/                 landing page source (Astro)
+├── tests/                   Node tests and browser harness pages
+├── tools/fetch-vendor.sh    re-fetch and verify the vendored MediaPipe files
+└── package.json             `wrap` command for npm link
+```
 
 ## Quick start
 
-Requires Linux with an X11 session on the laptop, Python 3, Node.js (for `npm link`), and any modern browser on the phone.
+You need Python 3.7 or newer and Node.js with npm on the laptop, and any modern browser on the phone. Each script checks the tools it needs, runs `npm install`, and starts the daemon. Run it with `setup` to install without starting, or `check` to only check.
+
+### Linux
+
+Log in to an X11 session (for example "Ubuntu on Xorg"). `echo $XDG_SESSION_TYPE` should print `x11`.
+
+```bash
+sudo apt install -y nodejs npm python3 curl xdotool x11-utils xclip wmctrl imagemagick python3-xlib
+git clone https://github.com/GC-WORK11/sign-wrap.git
+cd sign-wrap
+scripts/linux.sh
+```
+
+The script prints the matching `dnf` and `pacman` lines if a tool is missing. Optional tools: `pulseaudio-utils` or `alsa-utils` (volume), `playerctl` (media keys), `brightnessctl`, `network-manager` (wifi), `libnotify-bin` (confirm prompts), `adb`, `cloudflared`.
+
+### macOS
+
+```bash
+brew install node python          # or: xcode-select --install for python3
+git clone https://github.com/GC-WORK11/sign-wrap.git
+cd sign-wrap
+scripts/macos.sh
+```
+
+The first time, macOS asks to let your terminal control the computer. Allow it, then run `scripts/macos.sh` again. See [macOS](#macos) below.
+
+### Windows
+
+Install [Git for Windows](https://git-scm.com/download/win) (it includes Git Bash), [Node.js LTS](https://nodejs.org) and [Python 3](https://www.python.org) with "Add python.exe to PATH" ticked. Then open **Git Bash**:
 
 ```bash
 git clone https://github.com/GC-WORK11/sign-wrap.git
 cd sign-wrap
+scripts/windows.sh
+```
+
+From cmd.exe or PowerShell, skip the script and call the shim directly:
+
+```bat
+cd sign-wrap
 npm install
-npm link
-wrap start
+bin\wrap.cmd start
 ```
 
-`wrap start` runs the daemon in the background (it keeps running after the terminal closes) and prints a local network link, a QR code and a pairing code. Scan the QR code with the phone, or open the link in any phone browser, and the composer is ready. If the default port is taken, the next free port is used and printed.
+### After start
 
-**Camera and secure context.** Phone browsers only allow the camera on a secure page. Plain `http://<lan-ip>` links work for sending text and files, but not for Go Live. For the camera, use the laptop browser at `http://localhost:<port>`, connect the phone over USB with `wrap bridge` (then open `http://localhost:8741` on the phone), or run `wrap tunnel` for an https link (requires `cloudflared`).
+`start` runs the daemon in the background (it keeps running after the terminal closes) and prints a LAN link, a QR code and a pair code. If port 8741 is busy, the next free port is used and printed.
 
-```bash
-wrap status   # daemon state, pid, memory, link
-wrap logs     # daemon log
-wrap doctor   # checks the tools the daemon uses
-wrap stop     # shut down
-```
+Run `npm link` once in the repo to get a `wrap` command on your PATH. Without it, use `bin/wrap` (Linux, macOS), `node bin/wrap.js` (any OS) or the script, for example `scripts/linux.sh status`.
 
-## Features
+| Task | Linux | macOS | Windows (Git Bash) |
+|---|---|---|---|
+| Set up and start | `scripts/linux.sh` | `scripts/macos.sh` | `scripts/windows.sh` |
+| Check tools | `scripts/linux.sh doctor` | `scripts/macos.sh doctor` | `scripts/windows.sh doctor` |
+| Status | `scripts/linux.sh status` | `scripts/macos.sh status` | `scripts/windows.sh status` |
+| Show the QR again | `scripts/linux.sh pair` | `scripts/macos.sh pair` | `scripts/windows.sh pair` |
+| Follow the log | `scripts/linux.sh logs -f` | `scripts/macos.sh logs -f` | `scripts/windows.sh logs -f` |
+| Stop | `scripts/linux.sh stop` | `scripts/macos.sh stop` | `scripts/windows.sh stop` |
 
-| Feature | How it works |
+## Notes per OS
+
+### Linux
+
+- Typing uses `xdotool`; paste and images go through `xclip`; the `@` picker lists windows with `wmctrl`.
+- Wayland is detected and reported by `doctor`. Typing and window control need X11.
+- If the phone cannot open the link, allow the port: `sudo ufw allow 8741/tcp`.
+
+### macOS
+
+- **Accessibility.** Typing, key presses and app focus go through System Events. Grant Accessibility to the terminal app that runs `start` (Terminal, iTerm, etc.): System Settings > Privacy & Security > Accessibility. `scripts/macos.sh check` tells you whether it is granted. Restart the daemon after granting it.
+- **Screen Recording.** Only the screenshot action needs it. Grant it to the same terminal app under System Settings > Privacy & Security > Screen Recording.
+- Images are copied with `pbcopy` and converted with `sips`, both built in. `blueutil` (Homebrew) is optional, for the Bluetooth action.
+- If macOS asks whether Python may accept incoming connections, allow it, or the phone cannot reach the daemon.
+
+### Windows
+
+- Typing works by posting window messages to the focused window, so it needs no extra tools, drivers or admin rights. Clipboard, images and the window list use the built-in PowerShell.
+- On first start, Windows Defender Firewall may ask about Python. Allow it on private networks so the phone can connect.
+- The daemon keeps running after Git Bash closes. Stop it with `scripts/windows.sh stop`.
+
+### Not yet verified on real hardware
+
+Volume, mute, brightness and lock are implemented for macOS and Windows and pass the unit tests, but have not been checked end to end on a physical Mac or Windows PC. On Linux they are optional and appear only when their tool is installed.
+
+## Pairing
+
+The daemon creates a pairing key on first start and keeps it in `~/.config/wf/key` (mode 600). The phone needs the key once. There are three ways to hand it over:
+
+1. **QR code.** Scan the QR printed by `start` or `pair`. It opens the web app with the key in the link; the key is saved in the browser and removed from the address bar.
+2. **Pair code.** Open `http://<laptop-ip>:8741/` on the phone and type the 8-character code shown by `pair`. The code changes on every start; the key does not.
+3. **LAN link.** Open the printed `http://<laptop-ip>:8741/?k=...` link in any browser on the same network.
+
+The phone and laptop must be on the same network. For other setups:
+
+- **USB:** `wrap bridge` runs `adb reverse`, then open `http://localhost:8741` on the phone.
+- **Anywhere:** `wrap tunnel` gives an https link through `cloudflared`. It works for the composer. Live and Teach are refused through a tunnel on purpose.
+
+**Camera and secure context.** Phone browsers only allow the camera on https or `localhost`. A plain `http://<lan-ip>` page can send text and files but cannot open the camera. For Go Live and Teach, use the laptop browser at `http://localhost:8741`, or the phone over USB with `wrap bridge`.
+
+## Using it
+
+**Composer.** Type in the box and press send. The text is typed at the laptop cursor.
+
+**@ app picking.** Type `@` in the composer to list the open apps and windows on the laptop. Pick one and the next send goes there: the daemon focuses that window first, then types or pastes.
+
+**Text, images and videos.**
+
+| You send | What happens on the laptop |
 |---|---|
-| Composer send | Text, image, video, file from the phone; typed at the cursor or pasted into the focused app |
-| Go Live — Text | A performed sign types its bound phrase (e.g. "Hello") at the cursor |
-| Go Live — Control | The same sign fires its bound laptop action — open an app, press keys, switch windows |
-| Teach | Record 3 takes of your own sign; held-out verification confirms it before the sign goes live |
-| Prefilled packs | One-tap ready signs: Hello, Namaste (listening pause), Introduce yourself |
-| Laptop actions | `@` picker: apps, windows, workspaces, media, volume, screenshots, clipboard, chained steps — shown only while a laptop is connected |
-| Focus guard | Type/key actions verify the focused window at fire time and refuse anything unsafe; an optional allowlist (`WF_TYPE_ALLOW`) pins them to designated windows |
-| Confirm tiers | Destructive actions (e.g. close window) park for an explicit confirmation before running |
+| Text | Typed into the focused or picked window |
+| Image | Put on the clipboard as a picture and pasted, so it lands in chats, docs and editors |
+| Video or other file | Saved to `~/wf-uploads/` and pasted as a file where the app accepts files |
 
-## Architecture
+**Go Live.** Tap the live button to start the camera. Two modes:
 
-```mermaid
-flowchart LR
-    subgraph phone["Phone browser"]
-        UI["Composer + Go Live UI<br/>web/ — vanilla JS"]
-        CAM["Camera → hand keypoints<br/>vendored MediaPipe (WASM)<br/>video never leaves the phone"]
-    end
-    subgraph laptop["Laptop — Linux/X11"]
-        WFD["wfd.py daemon<br/>stdlib http :8741"]
-        BANK["Sign bank<br/>~/.config/wf — mode 600"]
-        ACT["Action layer<br/>argv-only spawn · risk tiers<br/>focus guard · confirmations"]
-        APP["Focused app<br/>editor · browser · desktop"]
-    end
-    UI -->|"send / teach / live events<br/>X-WF-Key authenticated"| WFD
-    CAM -->|"keypoints ~1 KB/frame"| WFD
-    WFD <--> BANK
-    WFD -->|"matched sign above threshold"| ACT
-    ACT -->|"xdotool type · paste · keys"| APP
-```
+- **Text:** a performed sign types its bound phrase, for example "Hello".
+- **Control:** the same sign runs its bound action: open an app, press keys, switch windows, change volume, take a screenshot.
 
-## Data flow
+**Teach.** Open Teach, name the sign, perform it three times, and bind it to a phrase or a one-tap action. The takes are checked against each other before the sign goes live. Ready-made packs (Hello, Namaste, Introduce yourself) can be added in one tap. An open palm starts listening and Namaste stops it.
 
-```mermaid
-flowchart TD
-    KP["kp42 frame (2×21 hand points)"] --> EP["endpointer<br/>motion / stillness segmentation"]
-    EP --> SEG["sign segment"]
-    SEG --> SB["signbank: resample → normalize →<br/>banded DTW vs taught exemplars"]
-    SB -->|"distance under reject bar"| OPS["signflow_ops<br/>mode + session semantics"]
-    SB -->|"over the bar"| ABSTAIN["abstain — nothing fires,<br/>nothing is guessed"]
-    OPS -->|"Text mode"| TYPE["type bound phrase at cursor"]
-    OPS -->|"Control mode"| ACTQ["action queue → provider.run()"]
-    ACTQ --> GUARD["verify_focus()<br/>+ tier floor + allowlist"]
-    GUARD -->|"safe"| OS["X11 effect"]
-    GUARD -->|"unsafe / tier 2"| REFUSE["refuse · or park for confirm"]
-```
+**Safety.** Type and key actions check the focused window when they fire and refuse when it cannot be verified. Destructive actions, such as closing a window, wait for a confirmation. Set `WF_TYPE_ALLOW` to pin typing to an allowlist of windows.
 
-## Teach, perform, act
+## CLI reference
 
-```mermaid
-sequenceDiagram
-    participant U as user
-    participant P as phone browser
-    participant D as daemon
-    participant X as laptop / X11
-    U->>P: Teach → name + bind action → perform ×3
-    P->>D: POST /teach/begin, /teach/take
-    D->>D: exemplars → bank; held-out take verifies
-    D-->>P: state: ready
-    U->>P: perform the sign (Go Live)
-    P->>D: POST /live/kp (keypoints only)
-    D->>D: endpointer → DTW match
-    alt Text mode
-        D->>X: type the bound phrase at the cursor
-    else Control mode
-        D->>X: focus check → run the bound action
-    end
-    D-->>P: match + action result on the live feed
-```
+The same commands exist on every OS (`bin/wrap` on Linux and macOS, `server/wrap_cli.py` on Windows, both behind `wrap` after `npm link`).
+
+| Command | Effect |
+|---|---|
+| `wrap start` | Start the daemon and print the LAN link, QR and pair code |
+| `wrap pair` | Show the QR, link and code again |
+| `wrap restart` | Stop, then start (new pair code, same key) |
+| `wrap status` | Up or down, pid, memory, LAN link, USB and tunnel state |
+| `wrap logs` / `wrap logs -f` | Last lines of the daemon log, or follow it |
+| `wrap send "text"` | Type text into the focused laptop window |
+| `wrap doctor` | Check required and optional tools and the session |
+| `wrap bridge` | USB: `adb reverse` so the phone can use `localhost:8741` |
+| `wrap tunnel` | https link through `cloudflared` |
+| `wrap install` / `wrap open` | Build and install, or launch, the optional Android app |
+| `wrap stop` | Stop the daemon and any tunnel |
+
+Set `WF_PORT` to use another port, for example `WF_PORT=8800 wrap start`. Taught signs and bindings live in `~/.config/wf/`. Logs and pid files are written to the repo folder and are gitignored.
 
 ## Tests
 
@@ -115,37 +282,16 @@ cd server && python3 -m unittest discover -s tests
 node --test tests/contribute.test.mjs tests/kp-pack.test.mjs
 ```
 
+The Python suite covers the macOS and Windows backends with mocked system calls, so it runs on any OS.
+
 ## Limitations
 
 See [`LIMITATIONS.md`](LIMITATIONS.md). In short:
 
 - Signs are personal and taught by each user. Sign-Flow is not a fixed sign-language recognizer.
-- Laptop actions need X11. Wayland is detected and reported.
-- Go Live needs a secure context on the phone (see Quick start).
+- Linux needs X11. Wayland is detected and reported.
+- Go Live needs a secure context on the phone (see [Pairing](#pairing)).
 - Typing and key actions check the focused window first and refuse when it cannot be verified.
-
-## Repository map
-
-```
-bin/wrap               CLI: start, stop, status, logs, pair, bridge, tunnel, doctor
-server/wfd.py          daemon: http, pairing, send, teach, live, actions
-server/signbank.py     taught-sign bank: normalize, banded DTW, open-set reject
-server/endpointer.py   motion segmentation
-server/signflow_ops.py session and mode semantics
-server/act_iface.py    action contract, risk tiers, focus guard
-server/act_linux.py    X11 provider (xdotool, wmctrl, xprop)
-server/system_ctl.py   system actions (media, volume, workspaces)
-server/packs.py        ready-made Teach packs
-server/qrcodegen.py    vendored QR generator
-server/tests/          unit and contract tests
-web/                   phone app: composer, Go Live, Teach, settings
-web/vendor/mediapipe/  vendored MediaPipe hand landmarker (no CDN)
-app/                   optional Android shell for the web app
-cloud/contribute/      Cloudflare Worker for opt-in training samples (not deployed)
-landing/               landing page source (Astro)
-tests/                 browser and Node tests
-tools/fetch-vendor.sh  re-fetch and verify the vendored MediaPipe files
-```
 
 ## Licenses
 

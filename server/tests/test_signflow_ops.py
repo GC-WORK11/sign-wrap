@@ -582,7 +582,8 @@ class CompositionsFile(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             p = os.path.join(td, "compositions.json")
             ops.save_compositions(p)
-            self.assertEqual(os.stat(p).st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual(os.stat(p).st_mode & 0o777, 0o600)
             bank = FakeBank()
             bank.add("OPEN", {"kind": "b1"})
             bank.add("BROWSER", {"kind": "b2"})

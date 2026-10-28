@@ -21,6 +21,10 @@ try:
 except ImportError:
     act_iface = act_linux = None
 try:
+    import act_platform          # the macOS/Windows provider
+except ImportError:
+    act_platform = None
+try:
     import system_ctl            # sys/media/net/clip ops behind the catalog
 except ImportError:
     system_ctl = None
@@ -50,11 +54,14 @@ BOUND_PORT = PORT  # set to the real port after bind (fallback may differ)
 BASE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(BASE)
 WEB = os.path.join(ROOT, "web")
-KEY_FILE = os.path.expanduser("~/.config/wf/key")
-UPLOADS = os.path.expanduser("~/wf-uploads")
-BANK_FILE = os.path.expanduser("~/.config/wf/signbank.json")
-COMMANDS_TSV = os.path.expanduser("~/.config/wf/commands.tsv")
-ENGINE_FILE = os.path.expanduser("~/.config/wf/engine")
+# HOME first so tests/sandboxes can redirect the config dir; on Windows
+# expanduser("~") reads USERPROFILE and ignores an injected HOME.
+_HOME = os.environ.get("HOME") or os.path.expanduser("~")
+KEY_FILE = os.path.join(_HOME, ".config", "wf", "key")
+UPLOADS = os.path.join(_HOME, "wf-uploads")
+BANK_FILE = os.path.join(_HOME, ".config", "wf", "signbank.json")
+COMMANDS_TSV = os.path.join(_HOME, ".config", "wf", "commands.tsv")
+ENGINE_FILE = os.path.join(_HOME, ".config", "wf", "engine")
 
 # request bodies are capped BEFORE reading (was: unbounded rfile.read)
 MAX_BODY = int(os.environ.get("WF_MAX_BODY", str(256 * 1024 * 1024)))
@@ -95,7 +102,34 @@ TEACH_TAKES = int(os.environ.get("WF_TEACH_TAKES", "3"))
 TERMINAL_CLASSES = (
     "terminal", "konsole", "alacritty", "kitty", "xterm", "st", "wezterm",
     "terminator", "tilix", "yakuake", "guake", "foot", "ghostty", "warp",
+    # windows console hosts — paste there is ctrl+shift+v, not ctrl+v
+    "windowsterminal", "cmd", "powershell", "pwsh", "conhost", "mintty",
 )
+
+
+def _host():
+    """'linux'|'macos'|'windows'|'other' — provider module when present
+    (tests patch act_platform.host_platform), else sys.platform."""
+    try:
+        if act_platform is not None:
+            return act_platform.host_platform()
+    except Exception:
+        pass
+    if sys.platform == "darwin":
+        return "macos"
+    if sys.platform.startswith(("win32", "cygwin")):
+        return "windows"
+    return "linux" if sys.platform.startswith("linux") else "other"
+
+
+def node_name():
+    """os.uname().nodename on POSIX; platform.node() on Windows
+    (os.uname doesn't exist there — calling it crashed /pair-info)."""
+    try:
+        return os.uname().nodename
+    except AttributeError:
+        import platform as _p
+        return _p.node() or "laptop"
 
 
 def load_key():
@@ -119,6 +153,74 @@ PAIR_RATE = {}  # ip -> last /pair attempt (rate limit, not secrecy)
 def all_ips():
     """All global IPv4 addrs, wifi interfaces first (a USB-tether IP is
     unreachable for a wifi-only phone)."""
+    if _host() == "windows" and act_platform is not None:
+        try:
+            # ipconfig is ~50 ms vs ~4 s for the PowerShell fallback —
+            # /pair-info must stay under wrap_cli's 3 s timeout.
+            wifi, other = [], []
+            alias = ""
+            for line in sh("ipconfig").stdout.splitlines():
+                m = re.match(r"^.*adapter (.+):\s*$", line.strip())
+                if m:
+                    alias = m.group(1).lower()
+                    continue
+                m = re.search(r"IPv4 Address[. ]*:\s*(\d+\.\d+\.\d+\.\d+)",
+                              line)
+                if not m:
+                    continue
+                addr = m.group(1)
+                if addr.startswith(("127.", "169.254.")):
+                    continue
+                (wifi if "wi-fi" in alias or "wlan" in alias
+                 else other).append(addr)
+            if wifi or other:
+                return wifi + other
+        except Exception:
+            pass
+        try:
+            ok, out = act_platform._ps(
+                'Get-NetIPAddress -AddressFamily IPv4 | '
+                'Where-Object {$_.IPAddress -ne "127.0.0.1" -and '
+                '$_.IPAddress -notlike "169.254.*" -and '
+                '$_.PrefixOrigin -ne "WellKnown"} | '
+                'ForEach-Object {"$($_.IPAddress)`t$($_.InterfaceAlias)"}')
+            wifi, other = [], []
+            if ok:
+                for line in out.splitlines():
+                    p = line.split("\t")
+                    if not p or not p[0].strip():
+                        continue
+                    addr = p[0].strip()
+                    alias = (p[1] if len(p) > 1 else "").lower()
+                    (wifi if "wi-fi" in alias or "wlan" in alias
+                     else other).append(addr)
+            if wifi or other:
+                return wifi + other
+        except Exception:
+            pass
+        return []
+    if _darwin():
+        try:
+            out = sh("ifconfig").stdout
+            wifi, other = [], []
+            ifname = ""
+            for line in out.splitlines():
+                m = re.match(r"^(\S+):", line)
+                if m:
+                    ifname = m.group(1)
+                    continue
+                m = re.search(r"\binet (\d+\.\d+\.\d+\.\d+)\b", line)
+                if not m:
+                    continue
+                addr = m.group(1)
+                if addr.startswith(("127.", "169.254.")) or ifname.startswith(
+                        ("utun", "bridge", "vmenet", "awdl", "llw",
+                         "gif", "stf", "lo", "ap", "anpi", "ipsec")):
+                    continue
+                (wifi if ifname.startswith("en") else other).append(addr)
+            return wifi + other
+        except Exception:
+            return []
     try:
         out = sh("ip", "-4", "-o", "addr", "show", "scope", "global").stdout
         wifi, other = [], []
@@ -153,7 +255,53 @@ def sh(*args):
     return subprocess.run(args, capture_output=True, text=True, timeout=10)
 
 
+def _darwin():
+    return _host() == "macos"
+
+
+def _run(argv, timeout=15):
+    """(ok, detail) argv-only spawn — same contract as act_platform._run."""
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True,
+                           timeout=timeout)
+        return r.returncode == 0, (r.stderr or r.stdout or "").strip()
+    except FileNotFoundError:
+        return False, "not found: %s" % argv[0]
+    except subprocess.TimeoutExpired:
+        return False, "%s timed out" % os.path.basename(str(argv[0]))
+    except OSError as e:
+        return False, str(e)
+
+
+def _osa(script, timeout=15):
+    return _run(["osascript", "-e", script], timeout=timeout)
+
+
+def _osa_esc(s):
+    """A string safe to embed inside an AppleScript "..." literal."""
+    return str(s).replace("\\", "\\\\").replace('"', '\\"')
+
+
 def active_window_class():
+    if _darwin():
+        try:
+            ok, out = _osa('tell application "System Events" to get name '
+                           'of first application process whose frontmost '
+                           'is true')
+            return out.strip().lower() if ok else ""
+        except Exception:
+            return ""
+    if _host() != "linux":
+        # provider's focused_app() answers with the same shape the
+        # terminal-class paste-key check reads (process name as class).
+        try:
+            f = ACT_PROVIDER.focused_app() if ACT_PROVIDER else None
+            got = ((f.wm_class or f.title) if f else "") or ""
+            if got:
+                return got
+        except Exception:
+            pass
+        return ""
     try:
         wid = sh("xdotool", "getactivewindow").stdout.strip()
         if not wid.isdigit():
@@ -170,8 +318,47 @@ def active_window_class():
         return ""
 
 
+def _mac_windows_ax():
+    return act_platform._mac_windows_ax() if act_platform is not None else []
+
+
+def _mac_app_names():
+    """Fallback when AX enumeration is unavailable (Accessibility denied):
+    visible app names, which `open -a` can still activate."""
+    ok, out = _osa('tell application "System Events" to get name of '
+                   'every application process whose visible is true')
+    if not ok:
+        return []
+    return [{"id": n.strip(), "title": n.strip(), "app": n.strip()}
+            for n in out.split(",") if n.strip()]
+
+
+def _mac_app_path(pid):
+    """pid -> the owning .app path ('open <path>' activates it without any
+    consent dialog), or ''."""
+    try:
+        comm = sh("ps", "-o", "comm=", "-p", str(pid)).stdout.strip()
+    except Exception:
+        return ""
+    parts = comm.split("/")
+    for i, seg in enumerate(parts):
+        if seg.endswith(".app"):
+            return "/".join(parts[:i + 1])
+    return ""
+
+
 def list_windows():
     """Open top-level windows on the laptop: [{id, title, app}]."""
+    if _darwin():
+        rows = _mac_windows_ax()
+        return rows if rows else _mac_app_names()
+    if _host() == "windows":
+        if ACT_PROVIDER is not None:
+            try:
+                return ACT_PROVIDER.list_windows()
+            except Exception as e:
+                print(f"[wfd] windows: {e!r}", flush=True)
+        return []
     out = []
     try:
         r = sh("wmctrl", "-lx")
@@ -195,6 +382,12 @@ def list_windows():
 def focus_window(wid):
     """Bring the picked window to the front before a send. True on success."""
     wid = str(wid or "").strip()
+    if not wid:
+        return False
+    if _darwin():
+        return _mac_focus_window(wid)
+    if _host() == "windows":
+        return _win_focus_window(wid)
     if not wid.isdigit():
         return False
     try:
@@ -207,6 +400,52 @@ def focus_window(wid):
         return r.returncode == 0
     except Exception:
         return False
+
+
+def _win_focus_window(wid):
+    """hex hwnd -> SetForegroundWindow (alt-tap lifts the foreground
+    lock); anything else is a window title resolved to an hwnd first."""
+    if act_platform is None:
+        return False
+    if act_platform._is_hwnd(wid):
+        ok, _ = act_platform._ps(
+            act_platform._hwnd_script(wid, act_platform._HWND_FOCUS))
+    else:
+        # Title -> hwnd first: AppActivate returns true but can't lift the
+        # foreground lock, so it silently leaves focus unchanged.
+        ok, det = act_platform._ps(
+            act_platform._win32_ps(
+                '$h = [WFU]::HwndByTitle(\'%s\')\n'
+                'if ($h -eq [IntPtr]::Zero) { exit 1 }\n'
+                % act_platform._psq(wid) + act_platform._HWND_FOCUS))
+    if ok:
+        time.sleep(0.4)  # SetForegroundWindow is async; let it settle
+    return ok
+
+
+def _mac_focus_window(wid):
+    """'pid:index:title' rows raise the exact window (act_platform, needs
+    Accessibility); a bare app name activates it (open -a, consent-free)."""
+    pid = str(wid).partition(":")[0]
+    if pid.isdigit():
+        if act_platform is not None and act_platform.mac_raise_window(wid):
+            time.sleep(0.2)
+            return True
+        # no Accessibility: NSWorkspace-level activate via the .app path
+        path = _mac_app_path(pid)
+        if path:
+            ok, _ = _run(["open", path])
+            if ok:
+                time.sleep(0.2)
+                return True
+        return False
+    # app-name row (or a name the picker shipped back)
+    ok, _ = _run(["open", "-a", wid])
+    if not ok:
+        ok, _ = _osa('tell application "%s" to activate' % _osa_esc(wid))
+    if ok:
+        time.sleep(0.2)
+    return ok
 
 
 # ALL keystroke/clipboard injection runs through ONE serial worker.
@@ -227,28 +466,102 @@ def _inject_worker():
 threading.Thread(target=_inject_worker, daemon=True).start()
 
 
-def type_keystrokes(text):
-    def job():
+def _paste_keys(cls=None):
+    """OS + focused-app aware paste chord."""
+    cls = cls if cls is not None else active_window_class()
+    if _host() == "macos":
+        return "cmd+v"
+    if any(t in cls for t in TERMINAL_CLASSES):
+        return "ctrl+shift+v"
+    return "ctrl+v"
+
+
+def _inject_keystrokes(text):
+    """One platform-true keystroke injector: xdotool on Linux, the
+    provider's PostMessage/osascript backend elsewhere."""
+    if _host() == "linux":
         subprocess.run(["xdotool", "type", "--clearmodifiers",
                         "--delay", "12", "--", text], timeout=600)
+        return True, ""
+    if ACT_PROVIDER is not None and hasattr(ACT_PROVIDER, "_type"):
+        return ACT_PROVIDER._type(text)
+    return False, "no keystroke backend on this platform"
+
+
+def _inject_chord(keys):
+    """One platform-true chord sender (paste keys, etc.)."""
+    if _host() == "linux":
+        return sh("xdotool", "key", "--clearmodifiers", keys).returncode == 0, ""
+    if ACT_PROVIDER is not None and hasattr(ACT_PROVIDER, "_press"):
+        return ACT_PROVIDER._press(keys)
+    return False, "no key backend on this platform"
+
+
+def type_keystrokes(text):
+    # osascript 'keystroke' posts real key events on macOS but maps
+    # non-ASCII through the keyboard layout and produces garbage
+    # (verified: "é"/"✓" typed as "a") — non-ASCII takes the clipboard
+    # path instead, which preserves the bytes exactly.
+    if _darwin() and not str(text).isascii():
+        type_paste(text)
+        return
+    def job():
+        ok, det = _inject_keystrokes(text)
+        if not ok:
+            print(f"[wfd] type refused: {det}", flush=True)
     _INJECT_Q.put(job)
+
+
+def _clip_get():
+    """Current plain-text clipboard (used to restore after a paste)."""
+    try:
+        if _darwin():
+            return sh("pbpaste").stdout
+        return sh("xclip", "-selection", "clipboard", "-o").stdout
+    except Exception:
+        return None
+
+
+def _clip_set(text):
+    if _darwin():
+        subprocess.run(["pbcopy"], input=text, text=True)
+    else:
+        subprocess.run(["xclip", "-selection", "clipboard", "-i"],
+                       input=text, text=True)
+
+
+def _paste_chord(cls):
+    """The focused app's paste shortcut."""
+    if _darwin():
+        return None                      # sent via osascript, not xdotool
+    return "ctrl+shift+v" if any(t in cls for t in TERMINAL_CLASSES) \
+        else "ctrl+v"
+
+
+def _send_paste_chord(cls):
+    if _darwin():
+        _osa('tell application "System Events" to keystroke "v" '
+             'using {command down}')
+    else:
+        sh("xdotool", "key", "--clearmodifiers", cls)
 
 
 def type_paste(text):
     cls = active_window_class()
-    paste_keys = "ctrl+shift+v" if any(t in cls for t in TERMINAL_CLASSES) else "ctrl+v"
-    try:
-        old = sh("xclip", "-selection", "clipboard", "-o").stdout
-    except Exception:
-        old = None
+    paste_keys = _paste_keys(cls)
+    old = act_platform.clip_get() if act_platform is not None else None
 
     def job():
-        subprocess.run(["xclip", "-selection", "clipboard", "-i"], input=text, text=True)
+        ok, det = act_platform.clip_set_text(text) \
+            if act_platform is not None else (False, "no clip backend")
+        if not ok:
+            print(f"[wfd] paste clip failed: {det}", flush=True)
+            return
         time.sleep(0.15)
-        sh("xdotool", "key", "--clearmodifiers", paste_keys)
+        _inject_chord(paste_keys)
         time.sleep(0.6)
         if old is not None:
-            subprocess.run(["xclip", "-selection", "clipboard", "-i"], input=old, text=True)
+            act_platform.clip_set_text(old)
 
     _INJECT_Q.put(job)
 
@@ -278,25 +591,97 @@ def sniff_mime(data, ctype):
     return ctype.split(";")[0] if ctype in IMG_EXT else "image/png"
 
 
+def _mac_set_file_clipboard(path, mime):
+    """NSPasteboard: file URL (pastes as a file anywhere) plus the image
+    object itself for image/* (pastes as pixels in image-capable apps).
+    JXA, stock frameworks — replaces the X11 wfclip.py owner."""
+    esc = str(path).replace("\\", "\\\\").replace('"', '\\"')
+    js = ('ObjC.import("AppKit");'
+          'var pb=$.NSPasteboard.generalPasteboard;pb.clearContents;'
+          'var u=$.NSURL.fileURLWithPath("%s");var o=[u];' % esc)
+    if str(mime or "").startswith("image/"):
+        js += ('var i=$.NSImage.alloc.initWithContentsOfFile("%s");'
+               'if(i&&!i.isNil){o.push(i);}' % esc)
+    js += 'pb.writeObjects(o);'
+    return _run(["osascript", "-l", "JavaScript", "-e", js])
+
+
 def paste_file(path, mime, cls):
-    keys = "ctrl+shift+v" if any(t in cls for t in TERMINAL_CLASSES) else "ctrl+v"
-    try:
-        old = sh("xclip", "-selection", "clipboard", "-o").stdout or None
-    except Exception:
-        old = None
+    keys = _paste_keys(cls)
+    old = act_platform.clip_get() if act_platform is not None else None
+    host = _host()
 
     def job():
-        subprocess.Popen([sys.executable, os.path.join(BASE, "wfclip.py"), path, mime],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
-        time.sleep(0.3)
-        sh("xdotool", "key", "--clearmodifiers", keys)
-        # hand the clipboard back so the next Ctrl+V doesn't replay the file path
-        time.sleep(1.2)
-        subprocess.run(["xclip", "-selection", "clipboard", "-i"],
-                       input=old if old is not None else "", text=True)
+        if host == "linux":
+            subprocess.Popen(
+                [sys.executable, os.path.join(BASE, "wfclip.py"), path, mime],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True)
+            time.sleep(0.3)
+            _inject_chord(keys)
+            # hand the clipboard back so the next Ctrl+V doesn't replay
+            # the file path
+            time.sleep(1.2)
+            if act_platform is not None:
+                act_platform.clip_set_text(old if old is not None else "")
+            return
+        # windows/macOS: the OS clipboard owns the data — no resident
+        # owner needed (X11's selection-owner model is why wfclip.py
+        # stays resident on Linux). Image mime -> real image target,
+        # anything else -> a file-drop list; an image the platform
+        # can't decode falls back to the file drop honestly.
+        ok, det = False, ""
+        if act_platform is not None and mime.startswith("image/"):
+            ok, det = act_platform.clip_set_image(path)
+        if not ok and act_platform is not None:
+            ok, det = act_platform.clip_set_files([path])
+        if not ok:
+            print(f"[wfd] file paste refused: {det}", flush=True)
+            return
+        time.sleep(0.2)
+        _inject_chord(keys)
+        time.sleep(1.0)
+        if old is not None:
+            act_platform.clip_set_text(old)
 
     _INJECT_Q.put(job)
+
+
+def _to_png(src):
+    """src image -> a png path, or None. sips on macOS (stock),
+    System.Drawing on Windows, ImageMagick elsewhere (all optional —
+    caller keeps src)."""
+    fd, png = tempfile.mkstemp(prefix="wf-img-", suffix=".png")
+    os.close(fd)
+    if _darwin():
+        try:
+            r = subprocess.run(["sips", "-s", "format", "png", src,
+                                "--out", png],
+                               capture_output=True, timeout=15)
+            ok = r.returncode == 0 and os.path.isfile(png)
+        except (OSError, subprocess.TimeoutExpired):
+            ok = False
+    elif _host() == "windows":
+        if act_platform is None:
+            os.unlink(png)
+            return None
+        esc_src, esc_png = (p.replace("'", "''") for p in (src, png))
+        ok, _ = act_platform._ps(
+            'Add-Type -AssemblyName System.Drawing; '
+            '$img = [System.Drawing.Image]::FromFile(\'%s\'); '
+            '$img.Save(\'%s\', [System.Drawing.Imaging.ImageFormat]::Png); '
+            '$img.Dispose()' % (esc_src, esc_png))
+    else:
+        try:
+            r = subprocess.run(["convert", src, png],
+                               capture_output=True, timeout=15)
+            ok = r.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            ok = False
+    if ok:
+        return png
+    os.unlink(png)
+    return None
 
 
 def send_image(data, ctype=""):
@@ -309,11 +694,8 @@ def send_image(data, ctype=""):
     if mime == "image/png" or mime == "image/gif":
         path = src                       # usable as-is (gif was never
     else:                                # written to its old fixed path)
-        fd, png = tempfile.mkstemp(prefix="wf-img-", suffix=".png")
-        os.close(fd)
-        r = subprocess.run(["convert", src, png],
-                           capture_output=True, timeout=15)
-        if r.returncode == 0:
+        png = _to_png(src)
+        if png:
             path, mime = png, "image/png"
             try:
                 os.unlink(src)
@@ -487,10 +869,14 @@ BANK = load_bank()
 # rows keep their existing direct-spawn path (legacy, already audited).
 # ---------------------------------------------------------------------
 ACT_PROVIDER = None
-if act_linux is not None:
+if act_iface is not None:
     try:
-        ACT_PROVIDER = act_linux.LinuxX11Provider(
-            config_dir=os.path.dirname(BANK_FILE))
+        if sys.platform.startswith("linux") and act_linux is not None:
+            ACT_PROVIDER = act_linux.LinuxX11Provider(
+                config_dir=os.path.dirname(BANK_FILE))
+        elif act_platform is not None:
+            ACT_PROVIDER = act_platform.CrossPlatformProvider(
+                config_dir=os.path.dirname(BANK_FILE))
 
         if system_ctl is not None:
             def _sys_plan(a, ctx):
@@ -708,10 +1094,16 @@ def _spawn(argv, note):
         env = dict(os.environ)
         env.pop("LD_LIBRARY_PATH", None)
         env.pop("SF_EXCLUSIVE", None)
-        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                                start_new_session=True, env=env)
+        kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+              "stderr": subprocess.DEVNULL, "env": env}
+        if os.name == "nt":
+            # setsid equivalent: a process group of its own + no console
+            kw["creationflags"] = (
+                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) |
+                getattr(subprocess, "DETACHED_PROCESS", 0))
+        else:
+            kw["start_new_session"] = True
+        proc = subprocess.Popen(argv, **kw)
         threading.Thread(target=lambda: proc.wait(), daemon=True).start()
         print(f"[wfd] act {note}: {' '.join(argv)} (pid {proc.pid})", flush=True)
         return True
@@ -721,6 +1113,17 @@ def _spawn(argv, note):
 
 
 def _notify(title, msg):
+    if _darwin():
+        try:
+            subprocess.Popen(
+                ["osascript", "-e",
+                 'display notification "%s" with title "%s"'
+                 % (_osa_esc(msg), _osa_esc(title))],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        return
     if not (os.environ.get("DISPLAY") or
             os.environ.get("DBUS_SESSION_BUS_ADDRESS")):
         return
@@ -1616,6 +2019,15 @@ def live_state():
         return st
 
 
+def _display_name():
+    """What the composer shows as the laptop display backend."""
+    if _darwin():
+        return "macos"
+    if sys.platform.startswith(("win32", "cygwin")):
+        return "windows"
+    return "x11" if os.environ.get("DISPLAY") else ""
+
+
 def _status_payload():
     """GET /status — the composer status strip's feed: focused window,
     live-listening flag, last send, parked confirms."""
@@ -1624,14 +2036,14 @@ def _status_payload():
         last = dict(LIVE["last_match"] or {})
     f = _focus_info()
     out = {"ok": True, "engine": detect_engine(),
-           "display": "x11" if os.environ.get("DISPLAY") else "",
+           "display": _display_name(),
            "focus": f.get("wm_class", ""), "focus_title": f.get("title", ""),
            "live": {"on": True, "listening": lst,
                     "text_mode": bool(LIVE.get("text_mode"))},
            "last_send": LAST_SEND, "last_match": last or None,
            "confirms": live_state()["pending"],
            "bank_size": bank_size(),
-           "name": os.uname().nodename,
+           "name": node_name(),
            # opt-in training samples: upload endpoint, empty = upload off
            "contribute_url": os.environ.get("SIGNFLOW_CONTRIBUTE_URL", "").strip()}
     # Sidebar "connected laptop" row: a 200 reply already proves the
@@ -2162,9 +2574,11 @@ class Handler(BaseHTTPRequestHandler):
             if (self.client_address[0] != "127.0.0.1" or proxied
                     or not host_lit):
                 return self._reply(403, b"localhost only")
-            out = json.dumps({"ip": lan_ip(), "ips": all_ips(), "port": BOUND_PORT,
+            ips = all_ips()
+            out = json.dumps({"ip": ips[0] if ips else lan_ip(),
+                              "ips": ips, "port": BOUND_PORT,
                               "key": SECRET, "code": PAIR_CODE,
-                              "name": os.uname().nodename}).encode()
+                              "name": node_name()}).encode()
             return self._reply(200, out, "application/json")
         # live-sign surface: key + LAN/USB only, before the open statics
         if p == "/live/state":
@@ -2190,7 +2604,8 @@ class Handler(BaseHTTPRequestHandler):
             if not authed(self.headers):
                 return self._reply(403, b'{"ok":false,"error":"unpaired"}',
                                    "application/json")
-            return self._jreply(200, {"ok": True, "windows": list_windows()})
+            return self._jreply(200, {"ok": True,
+                                      "windows": list_windows()})
         if p == "/status":
             if not self._gate():
                 return
@@ -2198,9 +2613,57 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/act":
             if not self._gate():
                 return
-            out = {"ok": True}
-            out.update(act_catalog_static())
-            out["pending"] = live_state()["pending"]
+            out = {"ok": True, "actions": act_catalog(),
+                   "pending": live_state()["pending"],
+                   "display": _display_name()}
+            if ACT_PROVIDER is not None:
+                try:
+                    cat = ACT_PROVIDER.catalog() or {}
+                    out["apps"] = cat.get("apps", [])
+                    out["windows"] = cat.get("windows", [])
+                    out["tools"] = cat.get("tools", [])
+                    out["capabilities"] = cat.get("capabilities")
+                    out["provider"] = cat.get("provider",
+                                              cat.get("name", "x11"))
+                    out["display"] = cat.get("display") or out["display"]
+                except Exception as e:
+                    out["provider_error"] = str(e)
+            # merged capability table: provider tools (apps, win, type,
+            # key, url, command) + system_ctl features (sys.*, media.*,
+            # net.*, clipboard.*) as the picker's features rows.
+            sys_caps = {}
+            if system_ctl is not None:
+                try:
+                    sys_caps = system_ctl.capabilities() or {}
+                    out["capabilities_system"] = sys_caps
+                except Exception:
+                    pass
+            feats, seen = [], set()
+            for r in (out.get("tools") or []):
+                tid = r.get("id") or r.get("type")
+                if not tid or tid in seen:
+                    continue
+                seen.add(tid)
+                cap = sys_caps.get(tid) or {}
+                feats.append({"type": tid,
+                              "label": r.get("label", tid),
+                              "tier": r.get("tier", cap.get("tier", 1)),
+                              "kind": r.get("kind", cap.get("kind", "")),
+                              "arg": r.get("arg"),
+                              "available": cap.get("available", True),
+                              "via": cap.get("via", [])})
+            for tid, cap in sorted(sys_caps.items()):
+                if tid in seen:
+                    continue
+                feats.append({"type": tid,
+                              "label": cap.get("label", tid),
+                              "tier": cap.get("tier", 1),
+                              "kind": cap.get("kind", "system"),
+                              "available": bool(cap.get("available")),
+                              "via": cap.get("via", []),
+                              "note": cap.get("note", "")})
+            out["features"] = feats
+            out["commands"] = out["actions"]   # alias: bound gloss->argv
             return self._jreply(200, out)
         if p.startswith("/act/icons/"):
             if not self._gate():
@@ -2342,7 +2805,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 code = ""
             if code and hmac.compare_digest(code, PAIR_CODE):
-                out = {"ok": True, "key": SECRET, "name": os.uname().nodename}
+                out = {"ok": True, "key": SECRET, "name": node_name()}
                 return self._reply(200, json.dumps(out).encode(), "application/json")
             return self._reply(403, b'{"ok":false,"error":"wrong code"}', "application/json")
 

@@ -302,6 +302,8 @@ class WfdCase(unittest.TestCase):
                      body={"id": ident, "gloss": gloss})
 
     # ---- contract: file permissions -----------------------------------------
+    @unittest.skipIf(os.name == "nt",
+                     "no unix mode bits on Windows")
     def test_key_file_mode_600(self):
         st = os.stat(os.path.join(self.tmp, ".config", "wf", "key"))
         self.assertEqual(st.st_mode & 0o777, 0o600)
@@ -312,6 +314,8 @@ class WfdCase(unittest.TestCase):
         path = os.path.join(self.tmp, ".config", "wf", "signbank.json")
         if not os.path.exists(path):
             self.skipTest("bank file not at ~/.config/wf/signbank.json")
+        if os.name == "nt":
+            self.skipTest("no unix mode bits on Windows")
         self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
 
     # ---- contract: live ingest is session-bound + rate-limited ---------------
