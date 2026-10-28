@@ -8,9 +8,9 @@ Camera video never leaves the phone. Hand tracking runs in the phone browser, an
 
 ## Share training samples (beta)
 
-This setting is **off by default**. It is in Settings.
+This setting is **not in the app in this release**, so sharing is off and nothing is collected for it. The code for it is written and tested but has no switch yet. If a phone turned it on under an earlier build, the app now turns it off on start, which deletes anything it saved.
 
-**If you turn it on**, each take you record in Teach is also saved on your phone, in a queue that holds at most 16 takes (the oldest is dropped first). Each saved take contains only:
+**When the setting ships, and only if you turn it on**, each take you record in Teach is also saved on your phone, in a queue that holds at most 16 takes (the oldest is dropped first). Each saved take contains only:
 
 - the name you gave the sign
 - up to 64 frames of hand landmark points (x, y, z for each of 42 points)
@@ -23,7 +23,7 @@ This setting is **off by default**. It is in Settings.
 
 ## Deleting the queue
 
-Turn **Share training samples (beta)** off. This deletes the saved takes and the random id immediately. Clearing the site data for Sign-Flow in your phone browser also deletes them.
+In this release the app deletes any saved takes and the random id on start, because the setting is off. Once the setting ships, turning it off deletes them immediately. Clearing the site data for Sign-Flow in your phone browser also deletes them.
 
 ## If upload is enabled in the future
 

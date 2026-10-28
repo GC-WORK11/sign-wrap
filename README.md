@@ -50,7 +50,7 @@ flowchart LR
     end
 
     subgraph laptop["Laptop daemon: server/wfd.py"]
-        HTTP["HTTP API on :8741<br/>X-WF-Key on every request"]
+        HTTP["HTTP API on :8741<br/>X-WF-Key on every action route"]
         INJ["Inject queue<br/>type, paste, files"]
         EP["endpointer.py<br/>motion and hold segments"]
         SB["signbank.py<br/>DTW match against your taught signs"]
@@ -110,6 +110,7 @@ sign-wrap/
 ├── server/
 │   ├── wfd.py               daemon: HTTP, pairing, send, teach, live, actions
 │   ├── wrap_cli.py          the same CLI in pure Python, used on Windows
+│   ├── wfclip.py            Linux clipboard owner for pasting images and files
 │   ├── act_iface.py         action contract, risk tiers, focus guard
 │   ├── act_linux.py         Linux X11 backend
 │   ├── act_platform.py      macOS and Windows backend
@@ -117,6 +118,9 @@ sign-wrap/
 │   ├── signbank.py          taught-sign bank: normalize, banded DTW, reject
 │   ├── endpointer.py        motion segmentation
 │   ├── signflow_ops.py      Text and Control mode semantics
+│   ├── teach_train.py       checks each Teach take against the others
+│   ├── macro.py             chained action steps
+│   ├── record_action.py     record an action on the laptop and replay it as a macro
 │   ├── packs.py             ready-made Teach packs
 │   ├── qrcodegen.py         vendored QR generator
 │   ├── qrprint.py           terminal QR printer
@@ -204,7 +208,7 @@ Run `npm link` once in the repo to get a `wrap` command on your PATH. Without it
 
 - **Accessibility.** Typing, key presses and app focus go through System Events. Grant Accessibility to the terminal app that runs `start` (Terminal, iTerm, etc.): System Settings > Privacy & Security > Accessibility. `scripts/macos.sh check` tells you whether it is granted. Restart the daemon after granting it.
 - **Screen Recording.** Only the screenshot action needs it. Grant it to the same terminal app under System Settings > Privacy & Security > Screen Recording.
-- Images are copied with `pbcopy` and converted with `sips`, both built in. `blueutil` (Homebrew) is optional, for the Bluetooth action.
+- Text goes on the clipboard with `pbcopy`. Images and files go on the pasteboard through `osascript` (NSPasteboard), and images are converted with `sips`. All three are built in. `blueutil` (Homebrew) is optional, for the Bluetooth action.
 - If macOS asks whether Python may accept incoming connections, allow it, or the phone cannot reach the daemon.
 
 ### Windows
@@ -251,9 +255,9 @@ The phone and laptop must be on the same network. For other setups:
 - **Text:** a performed sign types its bound phrase, for example "Hello".
 - **Control:** the same sign runs its bound action: open an app, press keys, switch windows, change volume, take a screenshot.
 
-**Teach.** Open Teach, name the sign, perform it three times, and bind it to a phrase or a one-tap action. The takes are checked against each other before the sign goes live. Ready-made packs (Hello, Namaste, Introduce yourself) can be added in one tap. An open palm starts listening and Namaste stops it.
+**Teach.** Open Teach and tap what the sign should do in the one-tap grid: a laptop action, an app, or a phrase to type. The name fills in from the tile; change it if you like. Perform the sign three times and finish. You can also skip the grid and pick any action with `@` after recording. The takes are checked against each other before the sign goes live. Ready-made signs (Hello, Introduce yourself) are tiles in the same grid. An open palm starts listening and Namaste (palms together) stops it; both are built in and cannot be retaught.
 
-**Safety.** Type and key actions check the focused window when they fire and refuse when it cannot be verified. Destructive actions, such as closing a window, wait for a confirmation. Set `WF_TYPE_ALLOW` to pin typing to an allowlist of windows.
+**Safety.** Actions fired by a sign check the focused window when they fire and refuse when it cannot be verified. A composer send goes to the window you picked with `@`; if that window has closed, the laptop refuses the send instead of typing somewhere else. Destructive actions, such as closing a window, wait for a confirmation. `WF_TYPE_ALLOW=<regex>` limits sign-fired actions to windows whose class or title matches.
 
 ## CLI reference
 
@@ -311,7 +315,7 @@ No GPL/AGPL, non-commercial, or research-only licensed code ships in this tree.
 
 Today every sign is personal: it is taught on your phone and matched on your laptop. The next step is a shared sign-to-text model that works before you teach anything.
 
-That model will be trained only on samples people choose to share. Sharing is an opt-in setting, **Share training samples (beta)**, off by default. When it is on, each Teach take is kept on the phone as hand landmarks only. Upload is not live in this release. See [`PRIVACY.md`](PRIVACY.md) for exactly what is and is not collected.
+That model will be trained only on samples people choose to share. Sharing will be an opt-in setting, **Share training samples (beta)**, off by default. The setting is not in the app in this release, so nothing is collected. When it ships and is on, each Teach take will be kept on the phone as hand landmarks only. See [`PRIVACY.md`](PRIVACY.md) for exactly what is and is not collected.
 
 ```mermaid
 flowchart LR
@@ -326,7 +330,7 @@ flowchart LR
 
 | Stage | State |
 |---|---|
-| Opt-in setting and local landmark queue | shipped, off by default |
+| Local landmark queue (`web/js/contribute.js`) | written and tested, no setting in the app yet |
 | Intake Worker (`cloud/contribute/`) | written and tested, not deployed |
 | Upload from the app | off: no endpoint is configured |
 | Shared model | planned |

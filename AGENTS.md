@@ -2,7 +2,7 @@
 
 > Type and control your laptop without touching it.
 
-This file is for a coding agent running on the founder's laptop (Linux, macOS or Windows). Use it to get the app running, fix small run errors, and help record the demo. Read it fully before you edit anything. Every command and path below was checked against `main`.
+This file is for a coding agent running on the founder's laptop (Linux, macOS or Windows). Use it to get the app running, fix small run errors, and help record the demo. Read it fully before you edit anything. Commands and paths below were last checked on 28 Oct 2026. Code is located by function or constant name, not line number, because line numbers drift: search for the name.
 
 ---
 
@@ -50,32 +50,32 @@ Auth: the pairing key is stored in `~/.config/wf/key` (mode 600). The app sends 
 | `bin/wrap.js` | `npm link` target (`package.json` → `"bin": {"wrap": "bin/wrap.js"}`). Runs `bin/wrap` with bash on Linux and macOS, `server/wrap_cli.py` on Windows. `bin/wrap.cmd` and `bin/wrap.ps1` are shims for cmd.exe and PowerShell. |
 | `server/wrap_cli.py` | The same CLI in stdlib Python (same subcommands, no curl). Used on Windows. |
 | `scripts/linux.sh`, `macos.sh`, `windows.sh` | Per-OS setup: check tools, `npm install`, start. Any CLI subcommand passes through, e.g. `scripts/macos.sh status`. `windows.sh` runs in Git Bash. |
-| `bin/wrap` | Bash CLI for Linux and macOS. `ROOT` is resolved with `readlink -f`, so the CLI always runs the copy it lives in. Subcommands: `start pair restart bridge stop status logs send install tunnel open doctor`. `bound_port()` (l.13) reads the real port from the log. `pair_card()` (l.24) prints the QR. `doctor` (l.~125) lists the dependencies. |
+| `bin/wrap` | Bash CLI for Linux and macOS. `ROOT` is resolved with `readlink -f`, so the CLI always runs the copy it lives in. Subcommands: `start pair restart bridge stop status logs send install tunnel open doctor`. `bound_port()` reads the real port from the log. `pair_card()` prints the QR. `doctor` lists the dependencies. |
 | `bin/wf` | Legacy alias. |
-| `server/wfd.py` | The daemon (about 2.7k lines). Config env vars are at l.48-93. `list_windows()` l.173 (`wmctrl -lx`). `focus_window()` l.195. Serial inject queue l.213-228. `type_keystrokes`/`type_paste` l.230/237. `send_text` l.256. `send_image` l.302 (converts to PNG with `convert`). `stream_upload` l.362 (writes to `~/wf-uploads`). `live_reset` l.620. `route_gloss` l.964. `_on_segment` l.1118 (in Teach mode it stores an exemplar; when listening it matches). `live_kp` l.1449. `teach_begin`/`teach_end` l.1654/1682. `bank_put`/`bank_delete` l.1736/1881. Routes: `do_GET` l.2142, `do_POST` l.2287, `do_DELETE` l.2638. `serve()` l.2661 tries the port, then the next 11 ports. |
-| `server/endpointer.py` | Motion and hold segmenter. **Tunables are the `Endpointer.__init__` defaults at l.144-151**: `enter_v 1.5`, `exit_v 0.7`, `quiet_s 0.35`, `min_seg_s 0.20`, `max_seg_s 3.0`, `hold_s 0.45`, `hold_v 1.2`, `open_ratio 1.55`, `hold_end_s 0.5`, `min_hold_seg_s 0.6`. `PRESENCE_SCORE 0.25` is at l.44. wfd builds it with the defaults (wfd l.631 and l.1488), so edit the defaults here. |
-| `server/signbank.py` | Personal sign bank. `RESAMPLE_N 32`, `MATCH_BAND 4`, `MIN_POINTS 8`, `MAX_EXEMPLARS 5` at l.129-132. `SignBank.__init__` l.382: `reject_threshold 0.6`, `min_score 0.5`, `shape_dim_weight 0.1`, `still_frac 0.08`. `add_exemplar` l.517, `match` l.651, `save`/`load` l.875/899. |
-| `server/teach_train.py` | `verify()` l.15 re-matches each take against the others after Teach. It reports results only and never blocks a sign. |
+| `server/wfd.py` | The daemon. Config env vars are near the top (`MAX_BODY`, `BODY_CAPS`, `LIVE_*`). `list_windows()` (`wmctrl -lx`). `focus_window()`. Serial inject queue. `type_keystrokes`/`type_paste`. `send_text`. `send_image` (converts to PNG with `convert` on Linux, `sips` on macOS). `stream_upload` (writes to `~/wf-uploads`). `live_reset`. `route_gloss`. `_on_segment` (in Teach mode it stores an exemplar; when listening it matches). `live_kp`. `teach_begin`/`teach_end`. `bank_put`/`bank_delete`. Routes: `do_GET`, `do_POST`, `do_DELETE`. `serve()` tries the port, then the next 11 ports. |
+| `server/endpointer.py` | Motion and hold segmenter. **Tunables are the `Endpointer.__init__` defaults**: `enter_v 1.5`, `exit_v 0.7`, `quiet_s 0.35`, `min_seg_s 0.20`, `max_seg_s 3.0`, `hold_s 0.45`, `hold_v 1.2`, `open_ratio 1.55`, `hold_end_s 0.5`, `min_hold_seg_s 0.6`. `PRESENCE_SCORE 0.25`. wfd builds it with the defaults, so edit the defaults here. |
+| `server/signbank.py` | Personal sign bank. `RESAMPLE_N 32`, `MATCH_BAND 4`, `MIN_POINTS 8`, `MAX_EXEMPLARS 5`. `SignBank.__init__`: `reject_threshold 0.6`, `min_score 0.5`, `shape_dim_weight 0.1`, `still_frac 0.08`. `add_exemplar`, `match`, `save`/`load`. |
+| `server/teach_train.py` | `verify()` re-matches each take against the others after Teach. It reports results only and never blocks a sign. |
 | `server/signflow_ops.py` | Session and mode semantics (Text, Control, observe). |
-| `server/act_iface.py` | Action contract, risk tiers and the focus guard (`verify_focus` l.606, `run` l.666). |
+| `server/act_iface.py` | Action contract, risk tiers and the focus guard (`verify_focus`, `run`). |
 | `server/act_linux.py` | X11 provider (xdotool, wmctrl, xprop, xrandr). |
 | `server/act_platform.py` | macOS and Windows provider (`CrossPlatformProvider`). wfd.py picks it when not on Linux. |
 | `server/system_ctl.py` | Volume, media, screenshot, lock, wifi and bluetooth actions (pactl/amixer, playerctl, scrot/maim/gnome-screenshot, nmcli, rfkill, brightnessctl, loginctl). Each one is optional and shows only if its tool exists. |
 | `server/macro.py` | Chained action steps (`kind: "macro"`). |
 | `server/record_action.py` | Teach by demonstration (`xinput test-xi2`). |
-| `server/packs.py` | Ready-made Teach packs: HELLO, NAMASTE (built in) and INTRO. `PACKS` l.15. |
+| `server/packs.py` | Ready-made Teach packs: HELLO, NAMASTE (built in) and INTRO. `PACKS`. |
 | `server/wfclip.py` | Holds a file on the clipboard for pasting (uses python3-xlib if present). |
 | `server/qrcodegen.py`, `qrprint.py` | Vendored MIT QR generator and the terminal QR printer. |
-| `web/index.html` | Single-page app shell. Composer pill at l.80-104. The action button `#act` contains `#tray-live` (Go Live) and `#go` (send). |
-| `web/js/app.js` | `App` core: API client `req()` l.19, `upload()` l.56, routes (`live teach signs laptop settings`) l.228, pairing `autoPair`/`pair` l.376/388. `#tray-live` opens Live (l.455). |
-| `web/js/compose.js` | Composer. `updateReady()` l.28 sets `.pill.ready`. `@` picker: `setTarget` l.121, `openWinMenu` l.132 (calls `GET /windows`). `send()` l.195 routes to `/send-file` (video and other files), `/send-image` (images, resized by `squeeze` at l.175) or `/send` (text). The window id goes in the `X-WF-Window` header or `window` field. |
-| `web/js/live.js` | Go Live. `KP_MS = 83` (about 12 Hz) l.82. Client palm-hold `HOLD = 420` ms l.369. `boot()` l.418. Laptop-camera fallback `useLaptop()` l.494. Text \| Control `setMode()` l.546: Text posts `observe` and adds each recognised word to the composer, Control posts `live` and fires actions. |
-| `web/js/teach.js` | Teach wizard: name → record 3 takes → bind (one-tap action grid) → done. `RESERVED` (PALM-OPEN, NAMASTE) l.104, `NEED = 3` l.105, `onResp` l.137 (take counting), `buildBind` l.285. |
-| `web/js/quick.js` | The one-tap action tiles (`TILES` l.43). A tile appears only if the laptop reports its tool. |
-| `web/js/pose.js` | Loads the vendored landmarker and packs frames into 42 points. The score falls back to 1 when the landmarker gives no visibility (l.84). |
+| `web/index.html` | Single-page app shell, including the composer pill. The action button `#act` contains `#tray-live` (Go Live) and `#go` (send). |
+| `web/js/app.js` | `App` core: API client `req()`, `upload()`, routes (`live teach signs laptop settings`), pairing `autoPair`/`pair`. `#tray-live` opens Live. |
+| `web/js/compose.js` | Composer. `updateReady()` sets `.pill.ready`. `@` picker: `setTarget`, `openWinMenu` (calls `GET /windows`). `send()` routes to `/send-file` (video and other files), `/send-image` (images, resized by `squeeze`) or `/send` (text). The window id goes in the `X-WF-Window` header or `window` field. |
+| `web/js/live.js` | Go Live. `KP_MS = 83` (about 12 Hz). Client palm-hold `HOLD = 420` ms. `boot()`. Laptop-camera fallback `useLaptop()`. Text \| Control `setMode()`: Text posts `observe` and adds each recognised word to the composer, Control posts `live` and fires actions. |
+| `web/js/teach.js` | Teach wizard: one-tap action grid and name (`mountGrid`, quick.js) → record 3 takes → bind (pre-filled from the grid, or `@`) → done. `RESERVED` (PALM-OPEN, NAMASTE), `NEED = 3`, `onResp` (take counting), `buildBind`. |
+| `web/js/quick.js` | The one-tap action tiles (`TILES`). A tile appears only if the laptop reports its tool. |
+| `web/js/pose.js` | Loads the vendored landmarker and packs frames into 42 points. The score falls back to 1 when the landmarker gives no visibility. |
 | `web/js/settings.js`, `laptop.js`, `drawer.js`, `library.js` | Settings (Vibrate on send), laptop pane, side drawer, sign library. |
-| `web/sw.js` | Service worker. **`VERSION` is at l.15** (`wf-shell-v36`). Bump it on every web change. |
-| `web/css/compose.css` | Composer styles. The `.act` black pill is at about l.51-62. |
+| `web/sw.js` | Service worker. **`VERSION`** (`wf-shell-v37`). Bump it on every web change. |
+| `web/css/compose.css` | Composer styles, including the `.act` black pill. |
 | `web/vendor/mediapipe/` | Vendored MediaPipe Tasks Vision plus the model (Apache-2.0, see `NOTICE.md` and `MANIFEST`). Do not edit or remove it. |
 | `cloud/contribute/` | Cloudflare Worker scaffold for opt-in landmark samples. **Not deployed, and no endpoint is configured** (`/status` → `contribute_url: ""`). Leave it alone for the demo. |
 | `landing/` | Astro landing page (deployed separately). Not needed to run the app. |
@@ -125,8 +125,8 @@ wrap start
 - **Port:** 8741 by default. Override with `WF_PORT=8800 wrap start`.
 - **State dir:** `~/.config/wf/` holds `key` (pairing key), `signbank.json` (taught signs), `commands.tsv` (bindings) and `engine`.
 - **Uploads:** files and videos go to `~/wf-uploads/`. Images go to `/tmp/wf-img-*.png`.
-- **Logs and pid files live in the repo folder, not the state dir:** `<repo>/wfd.log`, `<repo>/wfd.pid`, `<repo>/tunnel.log`. They are gitignored, so do not commit them.
-- **Other env knobs (wfd.py l.48-93):**
+- **Logs and pid files live in the state dir:** `~/.config/wf/wfd.log`, `wfd.pid`, `tunnel.log` and `tunnel.pid` (set `WF_STATE_DIR` to move them). Older builds wrote `wfd.log` and `wfd.pid` into the repo folder; `wrap stop` still stops a daemon started that way. Never commit them.
+- **Other env knobs (wfd.py):**
   - `WF_TEACH_TAKES` (3)
   - `WF_DUP_GAP_MS` (550)
   - `WF_PALM_SIGN` (PALM-OPEN)
@@ -167,7 +167,7 @@ Do not touch `~/.config/wf/key` unless you want to re-pair every device.
 
 **Service-worker cache:** the shell is served stale-while-revalidate, so a phone can keep running old JS. After any change under `web/`:
 
-1. Bump `VERSION` in `web/sw.js` l.15 (for example `wf-shell-v36`).
+1. Bump `VERSION` in `web/sw.js` (for example `wf-shell-v37` to `wf-shell-v38`).
 2. `wrap restart`.
 3. Hard-reload. On the laptop that's Ctrl+Shift+R. On the phone, close the tab and reopen it; if old code persists, clear the site data for the host.
 
@@ -211,25 +211,25 @@ curl -s "${H[@]}" localhost:$P/status | head -c 400   # engine, display x11, ban
 
 | Symptom | Cause | Fix / file |
 |---|---|---|
-| Teach shows 0/3 takes and "too short or had no hands" | The hand never moves (an open palm held still is read as the PALM-OPEN mode event, not a sign), or the take is under about 0.67 s (`MIN_POINTS 8` at 12 Hz), or no hand was detected | Bring the hand in, hold the shape 1 s, then drop it. Don't use an open palm. In the log, check for segment lines. If needed, lower `min_hold_seg_s` or `hold_end_s` in `endpointer.py` l.144-151. |
-| No hands detected at all (Live idle, 0 exemplars) | Landmark score of 0 | Already fixed: `pose.js` l.84 falls back to score 1. If you see 0 again, check that `PRESENCE_SCORE` (endpointer l.44) and `min_score` (signbank l.383) are not above the scores pose.js sends. |
-| V matched as L or C, or WIGGLE matched as POINT | The shape channel is a per-segment median (`shape_dim_weight 0.1`) and the trajectory is only the hand centroid, so finger motion is averaged away | Teach distinct shapes only (V, fist, point, thumbs-up). Optionally raise `shape_dim_weight` in `signbank.py` l.383 a little and re-run `test_signbank`. |
-| Fast signs are cut, or two signs merge into one | Endpointer thresholds | `endpointer.py` l.144-151. `max_seg_s` (3.0) force-closes long segments. `hold_end_s` (0.5) closes a segment on a held shape. `exit_v`/`quiet_s` set the quiet end. Sign slowly with a 1 s hold. |
+| Teach shows 0/3 takes and "too short or had no hands" | The hand never moves (an open palm held still is read as the PALM-OPEN mode event, not a sign), or the take is under about 0.67 s (`MIN_POINTS 8` at 12 Hz), or no hand was detected | Bring the hand in, hold the shape 1 s, then drop it. Don't use an open palm. In the log, check for segment lines. If needed, lower `min_hold_seg_s` or `hold_end_s` in the `Endpointer.__init__` defaults. |
+| No hands detected at all (Live idle, 0 exemplars) | Landmark score of 0 | Already fixed: `pose.js` falls back to score 1. If you see 0 again, check that `PRESENCE_SCORE` (endpointer) and `min_score` (signbank) are not above the scores pose.js sends. |
+| V matched as L or C, or WIGGLE matched as POINT | The shape channel is a per-segment median (`shape_dim_weight 0.1`) and the trajectory is only the hand centroid, so finger motion is averaged away | Teach distinct shapes only (V, fist, point, thumbs-up). Optionally raise `shape_dim_weight` in `signbank.py` a little and re-run `test_signbank`. |
+| Fast signs are cut, or two signs merge into one | Endpointer thresholds | The `Endpointer.__init__` defaults in `endpointer.py`. `max_seg_s` (3.0) force-closes long segments. `hold_end_s` (0.5) closes a segment on a held shape. `exit_v`/`quiet_s` set the quiet end. Sign slowly with a 1 s hold. |
 | An old sign wins over a new one | Old exemplars in `~/.config/wf/signbank.json` (up to 5 per sign) | `DELETE /bank?gloss=NAME`, or back up and move `signbank.json` aside (§3), then re-teach. |
-| Go Live never starts listening | The open palm isn't recognised (openness under `open_ratio 1.55`, or the hand moves more than `hold_v 1.2`) | Spread your fingers, hold still for 0.5 s, keep the palm facing the camera. Tune at endpointer l.144-151. |
-| The `@` target types into the wrong window | The window id changed (the window was closed or reopened), so `focus_window` fails quietly and the text goes to whatever has focus | Tap the chip and pick again. `focus_window` is at wfd.py l.195. |
+| Go Live never starts listening | The open palm isn't recognised (openness under `open_ratio 1.55`, or the hand moves more than `hold_v 1.2`) | Spread your fingers, hold still for 0.5 s, keep the palm facing the camera. Tune the `Endpointer.__init__` defaults in `endpointer.py`. |
+| "That window is closed. Pick another." after a send | The picked window was closed or reopened, so its id is gone. The daemon answers `409 window gone` and types nothing; the phone clears the `@` chip | Tap `@` and pick the window again. See `focus_window` and `WINDOW_GONE` in wfd.py. |
 | "No open windows" in the `@` list | `wmctrl` is missing, or the WM has no EWMH support | `sudo apt install wmctrl`. Check with `wmctrl -lx`. |
 | Multiple spaces collapse with `wrap send` | `text="$*"` joins arguments with single spaces | Quote the text: `wrap send "a  b"`. The composer path keeps spacing exactly. |
 | Characters dropped or wrong in some apps | xdotool typing plus the keyboard layout | Use paste mode (`{"mode":"paste"}`), or check the layout with `setxkbmap -query`. |
 | `adb: command not found` / `adb: no device` in `wrap status` | adb is optional | Harmless. Ignore it. |
 | A fix doesn't appear after an edit | The CLI runs another checkout: `ROOT` comes from `readlink -f` of the linked binary | `readlink -f "$(which wrap)"`. Re-run `npm link` in the right folder, or use `./bin/wrap`. |
 | `port 8741 busy — using :8742` | An old daemon or another app holds the port | `wrap stop`. Then `ss -ltnp \| grep 874` and kill the stale `wfd.py`. Or set `WF_PORT`. |
-| `daemon failed — see wfd.log` | Python error, or all 12 ports busy | Run `wrap logs`, or start it in the foreground: `python3 server/wfd.py`. |
+| `daemon failed — see ~/.config/wf/wfd.log (wrap logs)` | Python error, or all 12 ports busy | Run `wrap logs`, or start it in the foreground: `python3 server/wfd.py`. |
 | Nothing is typed. Doctor says `wayland` | xdotool can't inject on Wayland | Log out and choose the Xorg session. There is no ydotool fallback. |
 | The camera won't open on the phone | Plain http LAN page (no secure context) | Use the laptop browser at localhost, or `wrap bridge` (§4). |
 | Live or Teach returns `403 local only` | The request came through `wrap tunnel` | Expected. Use localhost or USB for the camera. |
 | `403 unpaired` | Missing or stale key in the browser | Re-scan the QR from `wrap pair`, or enter the code. |
-| Composer button is pink, has no arrow, or looks wrong | A CSS rule lost in a merge, or an old cached shell | `web/css/compose.css` about l.51-62: `.act` must use `background: var(--ink)` with a white glyph and **no** `.pill.ready .act` pink rule. Bump `sw.js` `VERSION` and hard-reload. |
+| Composer button is pink, has no arrow, or looks wrong | A CSS rule lost in a merge, or an old cached shell | `web/css/compose.css`: `.act` must use `background: var(--ink)` with a white glyph and **no** `.pill.ready .act` pink rule. Bump `sw.js` `VERSION` and hard-reload. |
 | An image pastes as a path or nothing | `convert` (imagemagick) or `python3-xlib` is missing | Install both. `wrap doctor` flags them. |
 | An upload fails with 413 or 507 | Size cap, or low disk space | `WF_MAX_UPLOAD` / `WF_MAX_IMAGE`. Free some disk space (64 MB headroom is kept). |
 
@@ -255,7 +255,7 @@ Errors start with `[wfd] <area>: <exception>` (for example `inject:`, `windows:`
   - The **composer and its send/Go Live button are dark black in every state**: a white waveform when empty (Go Live) and a white arrow when there is something to send.
   - Pink (`--accent`) is **only** for the lotus logo and small accents. Never use it for the composer, the send button or large surfaces.
 - **No taglines, helper text or explanatory paragraphs** in the UI. Labels are one or two words.
-- **Teach** is a one-tap action grid: name, 3 takes, tap an action, done. Don't add forms or steps.
+- **Teach** is a one-tap action grid: tap an action (the name fills in), 3 takes, done. Don't add forms or steps.
 - **No branding as a specific national sign language,** and no names of research datasets anywhere, in code, comments, UI or docs. Signs are personal and taught by the user.
 - **Never commit:**
   - video, or images of people or hands;
@@ -295,7 +295,7 @@ Errors start with `[wfd] <area>: <exception>` (for example `inject:`, `windows:`
 | 0:25-0:45 | Phone and laptop split | Type `@`, pick the editor window, type a line, tap the black send button. The text lands in the editor. |
 | 0:45-1:05 | Phone and laptop | Attach a photo, then send it into the doc or chat. Attach a short video (not of a person), then send it. |
 | 1:05-1:15 | Phone | Tap one quick action tile (Switch app or Volume) and show it happen on the laptop. |
-| 1:15-1:35 | Laptop camera (localhost) | Teach a new sign: name it, 3 takes held 1 s, tap an action in the grid, done. |
+| 1:15-1:35 | Laptop camera (localhost) | Teach a new sign: tap an action in the grid, 3 takes held 1 s, Finish. |
 | 1:35-1:55 | Laptop camera | Go Live: show an open palm to start listening. Text mode: V types "Hello". Switch to Control: fist switches the app. Palms together to stop. |
 | 1:55-2:00 | Landing page and repo | End card: landing URL and `github.com/GC-WORK11/sign-wrap`. |
 
