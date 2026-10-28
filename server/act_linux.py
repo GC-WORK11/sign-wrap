@@ -150,7 +150,7 @@ def exec_split(exec_str, app_name="", icon="", desktop_path=""):
       %c                            the (localized) app name
       %k                            the .desktop file path
       %%                            a literal %
-    Quoting: "..." groups an arg; \\ escapes (\\, \", \s, \n, \t honored).
+    Quoting: "..." groups an arg; \\ escapes (\\, \", \\s, \\n, \\t honored).
     A token that is only field codes drops; embedded codes are stripped.
     """
     # tokenizer: honors double-quoted spans + backslash escapes

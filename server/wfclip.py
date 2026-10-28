@@ -63,6 +63,15 @@ d.sync()
 if d.get_selection_owner(CLIP) != win:
     sys.exit("failed to own clipboard")
 
+# readiness handshake: the daemon waits for this line before it sends the
+# paste chord (a fixed sleep raced the ownership above under load).
+try:
+    sys.stdout.write("ready\n")
+    sys.stdout.flush()
+    os.close(sys.stdout.fileno())
+except OSError:
+    pass
+
 
 def payload_for(tgt_atom):
     if tgt_atom == MIME_ATOM and img_data is not None:

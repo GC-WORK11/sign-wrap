@@ -379,6 +379,9 @@ def list_windows():
     return out
 
 
+WINDOW_GONE = {"ok": False, "error": "window gone"}
+
+
 def focus_window(wid):
     """Bring the picked window to the front before a send. True on success."""
     wid = str(wid or "").strip()
@@ -601,9 +604,42 @@ def _mac_set_file_clipboard(path, mime):
           'var u=$.NSURL.fileURLWithPath("%s");var o=[u];' % esc)
     if str(mime or "").startswith("image/"):
         js += ('var i=$.NSImage.alloc.initWithContentsOfFile("%s");'
-               'if(i&&!i.isNil){o.push(i);}' % esc)
+               'if(i&&!i.isNil()){o.push(i);}' % esc)
     js += 'pb.writeObjects(o);'
     return _run(["osascript", "-l", "JavaScript", "-e", js])
+
+
+WFCLIP_READY_S = 5.0
+
+
+def _wfclip_own(path, mime, timeout=WFCLIP_READY_S):
+    """Start the resident X11 clipboard owner and wait until it reports
+    that it owns CLIPBOARD (one 'ready' line on its stdout). -> bool."""
+    import select
+    try:
+        p = subprocess.Popen(
+            [sys.executable, os.path.join(BASE, "wfclip.py"), path, mime],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            start_new_session=True)
+    except OSError:
+        return False
+    try:
+        r, _, _ = select.select([p.stdout], [], [], timeout)
+        line = p.stdout.readline() if r else b""
+    except (OSError, ValueError):
+        line = b""
+    finally:
+        try:
+            p.stdout.close()
+        except OSError:
+            pass
+    if line.strip() != b"ready":
+        if p.poll() is None:
+            p.kill()
+        return False
+    # reap it when it loses the selection (no zombie per paste)
+    threading.Thread(target=p.wait, daemon=True).start()
+    return True
 
 
 def paste_file(path, mime, cls):
@@ -613,11 +649,10 @@ def paste_file(path, mime, cls):
 
     def job():
         if host == "linux":
-            subprocess.Popen(
-                [sys.executable, os.path.join(BASE, "wfclip.py"), path, mime],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                start_new_session=True)
-            time.sleep(0.3)
+            if not _wfclip_own(path, mime):
+                print("[wfd] file paste refused: clipboard owner not ready",
+                      flush=True)
+                return
             _inject_chord(keys)
             # hand the clipboard back so the next Ctrl+V doesn't replay
             # the file path
@@ -2727,7 +2762,9 @@ class Handler(BaseHTTPRequestHandler):
                                       "signbank": signbank is not None})
         name = p.lstrip("/") or "index.html"
         path = os.path.normpath(os.path.join(WEB, name))
-        if not path.startswith(WEB) or not os.path.isfile(path):
+        # WEB + sep: a bare prefix test also matched sibling dirs such as
+        # <root>/web-old/ (normpath folds "../web-old/x" into one).
+        if not path.startswith(WEB + os.sep) or not os.path.isfile(path):
             return self._reply(404, b"nope")
         MIME = {".html": "text/html; charset=utf-8",
                 ".css": "text/css; charset=utf-8",
@@ -2766,8 +2803,12 @@ class Handler(BaseHTTPRequestHandler):
             if n <= 0:
                 return self._reply(200, b'{"ok":false}', "application/json")
             # cap check happens BEFORE reading a single byte of the body
-            if self.headers.get("X-WF-Window"):
-                focus_window(self.headers.get("X-WF-Window"))
+            if self.headers.get("X-WF-Window") and \
+                    not focus_window(self.headers.get("X-WF-Window")):
+                # picked window is gone: refuse instead of pasting into
+                # whatever happens to be focused. Body unread -> close.
+                self.close_connection = True
+                return self._jreply(409, WINDOW_GONE)
             name = urllib.parse.unquote(
                 self.headers.get("X-File-Name", "file"))
             status, obj, path = stream_upload(self.rfile, n, name)
@@ -2814,23 +2855,26 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/send-image":
             if raw:
-                if self.headers.get("X-WF-Window"):
-                    focus_window(self.headers.get("X-WF-Window"))
+                if self.headers.get("X-WF-Window") and \
+                        not focus_window(self.headers.get("X-WF-Window")):
+                    return self._jreply(409, WINDOW_GONE)
                 cls, mime = send_image(raw, self.headers.get("Content-Type", ""))
                 out = json.dumps({"ok": True, "into": cls, "mime": mime,
                                   "kb": round(len(raw) / 1024)}).encode()
                 return self._reply(200, out, "application/json")
             return self._reply(200, b'{"ok":false}', "application/json")
         if p == "/send":
+            win = None
             try:
                 data = json.loads(raw)
                 text = data.get("text", "")
                 mode = data.get("mode", "type")
                 expect = data.get("expect")        # optional focus guard
-                if data.get("window"):
-                    focus_window(data.get("window"))
+                win = data.get("window")
             except Exception:
                 text, mode, expect = raw.decode("utf-8", "replace"), "type", None
+            if win and not focus_window(win):
+                return self._jreply(409, WINDOW_GONE)
             if mode not in ("type", "paste"):
                 return self._jreply(400, {"ok": False,
                                           "error": "mode must be 'type' or 'paste'"})

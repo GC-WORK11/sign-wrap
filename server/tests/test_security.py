@@ -223,13 +223,23 @@ class WfdCase(unittest.TestCase):
         self.assertEqual(self.req("GET", "/health", auth=False)[0], 200,
                          "daemon died after oversized control bodies")
 
-    @unittest.expectedFailure   # known bug: unbounded request body
     def test_send_body_cap_413(self):
+        # Declare MAX_BODY+1 bytes but send only a little: the daemon must
+        # refuse on the Content-Length header alone, before reading or
+        # allocating the body, and answer 413 on the still-open socket.
+        s = socket.create_connection(self.url, timeout=10)
         try:
-            status, _, _ = self.req("POST", "/send", body=b"x" * MAX_BODY)
-        except OSError:
-            status = None   # handler thread died — still not a 413
-        self.assertEqual(status, 413)
+            s.sendall(("POST /send HTTP/1.1\r\nHost: x\r\nX-WF-Key: %s\r\n"
+                       "Content-Type: application/json\r\n"
+                       "Content-Length: %d\r\n\r\n" % (self.key, MAX_BODY + 1)
+                       ).encode() + b"x" * 1024)
+            head = s.recv(4096).decode("latin-1")
+        finally:
+            s.close()
+        self.assertTrue(head.startswith("HTTP/1."), head[:80])
+        self.assertEqual(int(head.split()[1]), 413, head[:80])
+        self.assertEqual(self.req("GET", "/health", auth=False)[0], 200,
+                         "daemon died after oversized /send")
 
     # ---- contract: commands never go through a shell -----------------------
     def test_no_shell_spawn_in_server_source(self):

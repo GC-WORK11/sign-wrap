@@ -16,6 +16,7 @@ a missing-binary stderr. The focus guard still runs: focused_app() is
 implemented via the frontmost process / foreground window, and returns
 None when the platform probe fails (guard then refuses).
 """
+import hashlib
 import json
 import os
 import re
@@ -50,7 +51,11 @@ def _run(argv, timeout=SUBPROC_TIMEOUT):
     try:
         r = subprocess.run(argv, capture_output=True, text=True,
                            timeout=timeout)
-        return r.returncode == 0, (r.stderr or r.stdout or "").strip()
+        ok = r.returncode == 0
+        # success -> stdout (callers parse it; PowerShell writes warnings to
+        # stderr even when the command worked); failure -> stderr first.
+        out = r.stdout if ok else (r.stderr or r.stdout)
+        return ok, (out or "").strip()
     except FileNotFoundError:
         return False, "not found: %s" % argv[0]
     except subprocess.TimeoutExpired:
@@ -133,9 +138,23 @@ public class WFU {
     "MozillaWindowClass", "_WwG", "TXTextControl", "WindowsForms10.EDIT",
     "CASCADIA_HOSTING_WINDOW_CLASS", "Internet Explorer_Server",
   };
+  static string ClassOf(IntPtr h) {
+    var sb = new StringBuilder(64);
+    GetClassNameW(h, sb, 64);
+    return sb.ToString();
+  }
+  static bool ClassIn(IntPtr h, string[] set) {
+    string cn = ClassOf(h);
+    foreach (string e in set)
+      if (cn.StartsWith(e, StringComparison.OrdinalIgnoreCase)) return true;
+    return false;
+  }
   static IntPtr FocusTarget() {
     IntPtr h = GetForegroundWindow();
     if (h == IntPtr.Zero) return IntPtr.Zero;
+    // Windows Terminal's CASCADIA_HOSTING_WINDOW_CLASS is the TOP-LEVEL
+    // window, never a child — match the foreground window itself first.
+    if (ClassIn(h, EditableClasses)) return h;
     IntPtr found = IntPtr.Zero;
     EnumChildWindows(h, (c, l) => {
       var sb = new StringBuilder(64);
@@ -148,6 +167,21 @@ public class WFU {
       return true;
     }, IntPtr.Zero);
     return found != IntPtr.Zero ? found : h;
+  }
+  // Only classic edit controls implement WM_PASTE/WM_CUT/...; Chrome's
+  // render widget, Firefox, Word and Windows Terminal ignore them.
+  static readonly string[] EditMsgClasses = {
+    "Edit", "RichEdit", "RICHEDIT", "Scintilla", "WindowsForms10.EDIT",
+    "TXTextControl",
+  };
+  // Real key events to the foreground window (modifier state included).
+  static void RealChord(int[] vks) {
+    foreach (int v in vks) keybd_event((byte)v, 0, 0, IntPtr.Zero);
+    for (int i = vks.Length - 1; i >= 0; i--)
+      keybd_event((byte)vks[i], 0, 2 /*KEYEVENTF_KEYUP*/, IntPtr.Zero);
+  }
+  static bool IsMod(int vk) {
+    return vk == 0x10 || vk == 0x11 || vk == 0x12 || vk == 0x5B;
   }
   static void Key(IntPtr t, int vk, bool up) {
     PostMessageW(t, up ? 0x0101u : 0x0100u, new IntPtr(vk), IntPtr.Zero);
@@ -183,7 +217,10 @@ public class WFU {
   public static void Chord(int[] vks) {
     IntPtr t = FocusTarget();
     if (t == IntPtr.Zero) return;
-    if (EditChord(t, vks)) return;
+    if (ClassIn(t, EditMsgClasses) && EditChord(t, vks)) return;
+    // a posted WM_KEY* chord carries no modifier state, so a modifier
+    // chord for any other control goes out as real key events
+    if (vks.Length > 1 && IsMod(vks[0])) { RealChord(vks); return; }
     foreach (int v in vks) Key(t, v, false);
     for (int i = vks.Length - 1; i >= 0; i--) Key(t, vks[i], true);
   }
@@ -270,9 +307,36 @@ public class WFU {
 '''
 
 
+_WIN32_TAG = hashlib.sha1(_WIN32_CS.encode("utf-8")).hexdigest()[:12]
+
+# Compiling the C# block costs ~1-2 s per PowerShell call. Compile it once
+# into a per-user cached DLL (name = source hash, so an edit recompiles)
+# and load that afterwards; any failure falls back to in-memory Add-Type.
+_WIN32_LOADER = r"""
+$wfuSrc = @'
+%s
+'@
+if (-not ('WFU' -as [type])) {
+  $wfuDir = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'wf' } else { [IO.Path]::GetTempPath() }
+  $wfuDll = Join-Path $wfuDir 'wfu-%s.dll'
+  try { if (Test-Path -LiteralPath $wfuDll) { Add-Type -LiteralPath $wfuDll -ErrorAction Stop } } catch {}
+  if (-not ('WFU' -as [type])) {
+    try {
+      New-Item -ItemType Directory -Force -Path $wfuDir -ErrorAction Stop | Out-Null
+      $wfuTmp = $wfuDll + '.' + $PID + '.tmp'
+      Add-Type -TypeDefinition $wfuSrc -OutputAssembly $wfuTmp -OutputType Library -ErrorAction Stop
+      Move-Item -LiteralPath $wfuTmp -Destination $wfuDll -Force -ErrorAction Stop
+    } catch {}
+    try { if (Test-Path -LiteralPath $wfuDll) { Add-Type -LiteralPath $wfuDll -ErrorAction Stop } } catch {}
+  }
+  if (-not ('WFU' -as [type])) { Add-Type -TypeDefinition $wfuSrc }
+}
+"""
+
+
 def _win32_ps(body):
-    """PowerShell script = embedded C# user32 class + caller statements."""
-    return "Add-Type -TypeDefinition @'\n%s\n'@\n%s" % (_WIN32_CS, body)
+    """PowerShell script = C# user32 class (cached DLL) + caller statements."""
+    return (_WIN32_LOADER % (_WIN32_CS, _WIN32_TAG)) + body
 
 
 def _is_hwnd(v):
@@ -325,12 +389,21 @@ def clip_get():
         ok, out = _ps('Get-Clipboard -Raw -ErrorAction SilentlyContinue')
         return out if ok else None
     if h == "macos":
-        ok, out = _run(["pbpaste"])
-        return out if ok else None
+        return _read_raw(["pbpaste"])
     if h == "linux":
-        ok, out = _run(["xclip", "-selection", "clipboard", "-o"])
-        return out if ok else None
+        return _read_raw(["xclip", "-selection", "clipboard", "-o"])
     return None
+
+
+def _read_raw(argv):
+    """stdout of argv verbatim (no strip: a restored clipboard must keep
+    its trailing newlines), or None on any failure."""
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True,
+                           timeout=SUBPROC_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout if r.returncode == 0 else None
 
 
 def clip_set_text(text):
@@ -349,10 +422,17 @@ def clip_set_text(text):
             return False, str(e)
     if h == "linux":
         try:
+            # xclip forks a resident selection owner that inherits the
+            # child's stdout/stderr: capturing them (pipes) makes run()
+            # wait for that owner to exit, i.e. until the next copy —
+            # every paste then hit the timeout. Discard them instead.
             r = subprocess.run(["xclip", "-selection", "clipboard", "-i"],
-                               input=text, text=True, capture_output=True,
+                               input=text, text=True,
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL,
                                timeout=SUBPROC_TIMEOUT)
-            return r.returncode == 0, (r.stderr or "").strip()
+            return r.returncode == 0, "" if r.returncode == 0 else \
+                "xclip exited %d" % r.returncode
         except (OSError, subprocess.TimeoutExpired) as e:
             return False, str(e)
     return False, _UNSUPPORTED
@@ -859,8 +939,13 @@ class CrossPlatformProvider(ActionProvider):
         def fn(_ctx):
             if self.platform == "macos":
                 if want:
-                    ok, det = _osa('tell application "%s" to quit'
-                                   % _osa_text(want))
+                    # close the app's front window — `quit` would end
+                    # the whole app (every window, unsaved-work prompts)
+                    ok, det = _osa(
+                        'tell application "%s" to activate\n'
+                        'delay 0.2\n'
+                        'tell application "System Events" to keystroke '
+                        '"w" using {command down}' % _osa_text(want))
                 else:
                     ok, det = _osa('tell application "System Events" to '
                                    'keystroke "w" using {command down}')
