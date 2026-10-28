@@ -38,7 +38,9 @@
     "LIMITATIONS.md",
     "PRIVACY.md",
     "SECURITY.md",
-    "THIRD_PARTY_NOTICES"
+    "THIRD_PARTY_NOTICES",
+    "!**/__pycache__/**",
+    "!**/*.pyc"
   ],
   "scripts": {
     "wrap": "node bin/wrap.js start",

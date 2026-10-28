@@ -11,9 +11,9 @@ if [ -z "$SDK" ] || [ ! -d "$SDK" ]; then
     echo "Android SDK not found — set ANDROID_HOME (e.g. export ANDROID_HOME=~/Android/Sdk)" >&2
     exit 1
 fi
-BT=$(ls -d "$SDK"/build-tools/* 2>/dev/null | sort -V | tail -1)
-AJAR=$(ls -d "$SDK"/platforms/android-*/android.jar 2>/dev/null | sort -V | tail -1)
-[ -n "$BT" ] && [ -n "$AJAR" ] || { echo "SDK incomplete — need build-tools/ and platforms/android-*/" >&2; exit 1; }
+BT=$(find "$SDK/build-tools" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -1)
+AJAR=$(find "$SDK/platforms" -mindepth 2 -maxdepth 2 -path '*/android-*/android.jar' 2>/dev/null | sort -V | tail -1)
+if [ -z "$BT" ] || [ -z "$AJAR" ]; then echo "SDK incomplete — need build-tools/ and platforms/android-*/" >&2; exit 1; fi
 for tool in javac zip keytool; do
     command -v "$tool" >/dev/null || { echo "missing: $tool" >&2; exit 1; }
 done
@@ -34,8 +34,9 @@ javac --release 8 -cp "$AJAR" -d "$B/classes" \
     "$B/gen/com/wf/composer/R.java" "$ROOT/src/com/wf/composer/MainActivity.java"
 
 echo "[3/5] d8"
-"$BT/d8" --lib "$AJAR" --min-api 26 --output "$B/dex" \
-    $(find "$B/classes" -name '*.class')
+CLASSES=()
+while IFS= read -r -d '' c; do CLASSES+=("$c"); done < <(find "$B/classes" -name '*.class' -print0)
+"$BT/d8" --lib "$AJAR" --min-api 26 --output "$B/dex" "${CLASSES[@]}"
 (cd "$B/dex" && zip -qj "$B/app.apk" classes.dex)
 
 echo "[4/5] zipalign"

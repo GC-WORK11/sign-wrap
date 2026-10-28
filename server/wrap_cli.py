@@ -26,11 +26,17 @@ import urllib.error
 SELF = os.path.realpath(__file__)
 ROOT = os.path.dirname(os.path.dirname(SELF))
 PORT = int(os.environ.get("WF_PORT", "8741"))
-PIDFILE = os.path.join(ROOT, "wfd.pid")
-LOG = os.path.join(ROOT, "wfd.log")
-TUNLOG = os.path.join(ROOT, "tunnel.log")
-TUNPID = os.path.join(ROOT, "tunnel.pid")
-KEYFILE = os.path.expanduser(os.path.join("~", ".config", "wf", "key"))
+# Same HOME-first rule as wfd.py (tests/sandboxes redirect HOME).
+_HOME = os.environ.get("HOME") or os.path.expanduser("~")
+KEYFILE = os.path.join(_HOME, ".config", "wf", "key")
+# Log + pid files live in the per-user state dir, NOT the package folder:
+# a global npm install is usually not writable by the user.
+STATE = os.environ.get("WF_STATE_DIR") or os.path.join(_HOME, ".config", "wf")
+PIDFILE = os.path.join(STATE, "wfd.pid")
+LOG = os.path.join(STATE, "wfd.log")
+TUNLOG = os.path.join(STATE, "tunnel.log")
+TUNPID = os.path.join(STATE, "tunnel.pid")
+LEGACY_PIDFILE = os.path.join(ROOT, "wfd.pid")   # pre-0.2.1 location
 CF = os.environ.get("CF") or shutil.which("cloudflared") \
     or os.path.expanduser(os.path.join("~", ".local", "bin", "cloudflared"))
 
@@ -45,6 +51,13 @@ def _dash():
     glyph. Only trust it when stdout actually speaks UTF-8."""
     enc = (sys.stdout.encoding or "").lower().replace("-", "").replace("_", "")
     return "—" if enc == "utf8" else "-"
+
+
+def _state_dir():
+    try:
+        os.makedirs(STATE, mode=0o700, exist_ok=True)
+    except OSError:
+        pass
 
 
 def bound_port():
@@ -162,6 +175,7 @@ def cmd_start():
     if daemon_running():
         print("daemon already running on :%d" % live_port())
     else:
+        _state_dir()
         open(LOG, "w").close()      # truncate so bound_port() is fresh
         proc = _spawn_daemon()
         try:
@@ -177,7 +191,7 @@ def cmd_start():
             return 1
         bp = live_port()
         if bp != PORT:
-            print("port %d busy " + _dash() + " using :%d" % (PORT, bp))
+            print(("port %d busy " + _dash() + " using :%d") % (PORT, bp))
     r = _adb("get-state")
     if r is not None and r.returncode == 0:
         r2 = _adb("reverse", "tcp:8741", "tcp:%d" % live_port())
@@ -190,8 +204,8 @@ def cmd_start():
     lip = json.loads(info).get("ip", "") if info else ""
     if lip and lip != "127.0.0.1" and _get("/health", host=lip,
                                            timeout=2) is None:
-        print("firewall: http://%s:%d unreachable from here " + _dash() + " likely a "
-              "firewall." % (lip, live_port()))
+        print(("firewall: http://%s:%d unreachable from here " + _dash()
+               + " likely a firewall.") % (lip, live_port()))
         if IS_NT:
             print('          allow it: netsh advfirewall firewall add '
                   'rule name="sign-flow" dir=in action=allow '
@@ -205,11 +219,15 @@ def cmd_start():
 
 def cmd_stop():
     _kill_pid_file(PIDFILE, "daemon")
+    _kill_pid_file(LEGACY_PIDFILE, "daemon")
     _kill_pid_file(TUNPID, "tunnel")
     adb = shutil.which("adb")
     if adb:
-        subprocess.run([adb, "reverse", "--remove", "tcp:8741"],
-                       capture_output=True, timeout=10)
+        try:
+            subprocess.run([adb, "reverse", "--remove", "tcp:8741"],
+                           capture_output=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
     return 0
 
 
@@ -328,6 +346,7 @@ def cmd_tunnel():
         return 1
     _kill_pid_file(TUNPID, "tunnel")
     time.sleep(0.5)
+    _state_dir()
     log = open(TUNLOG, "wb")
     kw = {"stdin": subprocess.DEVNULL, "stdout": log, "stderr": log,
           "close_fds": True}
@@ -337,7 +356,7 @@ def cmd_tunnel():
         kw["start_new_session"] = True
     try:
         proc = subprocess.Popen(
-            [CF, "tunnel", "--url", "http://localhost:%d" % PORT,
+            [CF, "tunnel", "--url", "http://localhost:%d" % live_port(),
              "--no-autoupdate"], **kw)
     except OSError as e:
         log.close()
@@ -419,7 +438,8 @@ def cmd_doctor():
                 "image -> png normalization (imagemagick)"),
                ("python3-xlib", pyxlib(),
                 "multi-target clipboard (apt: python3-xlib)")]
-        opt = [("adb", have("adb"), "usb bridge + app install"),
+        opt = [("wmctrl", have("wmctrl"), "@ window list + focus"),
+               ("adb", have("adb"), "usb bridge + app install"),
                ("cloudflared", have("cloudflared"),
                 "wrap tunnel — anywhere access"),
                ("scrcpy", have("scrcpy"), "phone screen mirroring"),
@@ -482,7 +502,7 @@ def cmd_doctor():
     return 1 if bad else 0
 
 
-USAGE = """wrap — Flow Composer bridge (phone -> laptop cursor)
+USAGE = """wrap — Sign-Flow bridge (phone -> laptop cursor)
   wrap start     start daemon + show pair QR (scan = connected)
   wrap pair      show pair QR / one-shot code again
   wrap bridge    adb reverse (after replug)
@@ -493,6 +513,7 @@ USAGE = """wrap — Flow Composer bridge (phone -> laptop cursor)
   wrap send TEXT type TEXT at laptop cursor
   wrap install   build + install Android app (optional)
   wrap open      launch app on phone
+  wrap restart   stop + start
   wrap stop      stop daemon"""
 
 
@@ -508,9 +529,10 @@ def main(argv):
         return cmd_start()
     if cmd == "bridge":
         _adb("wait-for-device")
-        r = _adb("reverse", "tcp:8741", "tcp:%d" % PORT)
+        r = _adb("reverse", "tcp:8741", "tcp:%d" % live_port())
         if r is not None and r.returncode == 0:
-            print("usb bridge up: phone localhost:8741 -> laptop :%d" % PORT)
+            print("usb bridge up: phone localhost:8741 -> laptop :%d"
+                  % live_port())
             return 0
         print("adb reverse failed")
         return 1

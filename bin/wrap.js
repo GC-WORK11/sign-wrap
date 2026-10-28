@@ -37,7 +37,9 @@ function findPython() {
 }
 
 const isWin = process.platform === "win32";
-const bash = isWin ? null : (have("bash") ? "bash" : (have("sh") ? "sh" : null));
+// bin/wrap uses bash syntax (arrays, [[ ]], local) — plain `sh` (dash)
+// can't run it, so without bash we take the Python port instead.
+const bash = isWin ? null : (have("bash") ? "bash" : null);
 
 let argv;
 if (bash && fs.existsSync(path.join(ROOT, "bin", "wrap"))) {
@@ -52,7 +54,6 @@ if (bash && fs.existsSync(path.join(ROOT, "bin", "wrap"))) {
 }
 
 const r = spawnSync(argv[0], [...argv[1], ...process.argv.slice(2)], {
-  stdio: "inherit",
-  cwd: ROOT,
+  stdio: "inherit",          // cwd stays the caller's: relative args keep working
 });
 process.exit(r.status === null ? 1 : r.status);

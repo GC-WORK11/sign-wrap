@@ -34,21 +34,26 @@ check() {
     if python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 7) else 1)'; then :; else
         echo "python 3.7 or newer is required"; return 1
     fi
+    for t in blueutil adb cloudflared; do
+        have "$t" || echo "optional, not found: $t"
+    done
+    echo "tools: ok"
     if osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true' >/dev/null 2>&1; then
         echo "accessibility: ok"
     else
         echo "accessibility: not granted. Open System Settings > Privacy & Security > Accessibility,"
         echo "               turn on your terminal app, then run this again."
+        return 3
     fi
-    for t in blueutil adb cloudflared; do
-        have "$t" || echo "optional, not found: $t"
-    done
-    echo "tools: ok"
     return 0
 }
 
 setup() {
-    check
+    # tools missing -> stop; only Accessibility missing (3) -> keep going,
+    # the warning above already says what to turn on.
+    local rc=0
+    check || rc=$?
+    [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ] || exit "$rc"
     (cd "$ROOT" && npm install --no-audit --no-fund)
     echo "setup done. Optional: run 'npm link' in $ROOT to put 'wrap' on your PATH."
 }
