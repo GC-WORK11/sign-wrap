@@ -37,18 +37,11 @@ App.buzz = () => { if (App.store.getItem('wfvib') !== '0') buzzReal(); };
 vib.checked = App.store.getItem('wfvib') !== '0';
 vib.onchange = () => App.store.setItem('wfvib', vib.checked ? '1' : '0');
 
-// training samples (beta) — off by default; turning it off deletes the
-// local queue and the random id (contribute.js)
-const share = sheet.querySelector('#st-share'),
-      shareNote = sheet.querySelector('#st-share-note');
-if (share) {
-  share.checked = !!Contribute && Contribute.enabled();
-  shareNote.hidden = !share.checked;
-  share.onchange = () => {
-    if (Contribute) Contribute.setEnabled(share.checked);
-    shareNote.hidden = !share.checked;
-  };
-}
+// training samples (beta): the setting is not in the app in this release.
+// A phone that turned it on under an older build would keep queueing with
+// no switch to stop it, so switch it off here (this also deletes the local
+// queue and the random id, see contribute.js).
+if (Contribute && Contribute.enabled()) Contribute.setEnabled(false);
 
 // replay seam — the same flag pose.js checks; needs ?replay once or this
 // toggle. Off by default.

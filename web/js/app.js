@@ -283,6 +283,7 @@ function kpFrame(points) {
 function daemonErr(r, fallback) {
   const e = (r && r.json && r.json.error) || '';
   if (r && r.status === 403 || /unpaired|pair/i.test(e)) return 'Not connected — scan the code again.';
+  if (/window gone/.test(e)) return 'That window is closed. Pick another.';
   if (/reserved/.test(e)) return 'That name is taken by a built-in sign.';
   if (/too large|too big/.test(e)) return 'That file is too big to send.';
   if (/rate|slow/.test(e)) return 'Slow down — try again.';

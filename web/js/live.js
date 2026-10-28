@@ -74,10 +74,8 @@ const video = $('lv-cam'), skel = $('lv-skel'), cover = $('lv-cover'),
       viewEl = $('lv-view'), sendBtn = $('lv-send'), flipBtn = $('lv-flip'),
       segText = $('lv-m-text'), segCtl = $('lv-m-ctl');
 
-const HINTS = {
-  control: { idle: 'Hold an open palm to start. Then sign a command.', on: 'Listening. Sign a command.' },
-  text:    { idle: 'Hold an open palm to start. Then sign words.',   on: 'Listening. Each sign becomes a word.' },
-};
+// no helper text on the live view: the badge and the hold bar carry the state
+const HINTS = { control: { idle: '', on: '' }, text: { idle: '', on: '' } };
 let HINT_DEF = HINTS.control.idle;
 const KP_MS = 83;        // ~12 Hz keypoint frames (spec: 10-15 Hz)
 const ST_MS = 167;       // ~6 Hz state poll while open
@@ -177,7 +175,8 @@ function setBadge(cls, txt) {
   badgeT.textContent = txt;
 }
 function renderEng() {
-  engEl.textContent = S.eng.name ? ' · ' + S.eng.name : '';
+  // the backend's name (python-dtw, rust-kp53…) is internal: dev mode only
+  engEl.textContent = document.body.classList.contains('dev') && S.eng.name ? S.eng.name : '';
 }
 
 /* ---------- overlay card ---------- */
@@ -229,7 +228,7 @@ async function probe() {
 }
 function engDown() {
   S.eng.up = false;
-  engEl.textContent = ' · offline';
+  engEl.textContent = '';
   setBadge('err', 'offline');
 }
 

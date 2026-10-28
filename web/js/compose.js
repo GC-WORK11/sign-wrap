@@ -218,7 +218,10 @@ async function send() {
         }
         imgOk = r.ok; into = r.json && r.json.into;
         if (imgOk) { clearStaged(); await App.sleep(450); }
-        else App.toast(App.daemonErr(r, 'Couldn’t send. Try again.'), true);
+        else {
+          App.toast(App.daemonErr(r, 'Couldn’t send. Try again.'), true);
+          if (r.status === 409) { setTarget(null); return; }   // window gone: keep the text, drop the dead target
+        }
       } catch (e) { App.toast('Can’t reach your laptop.', true); }
     }
     if (text.trim()) {
@@ -226,7 +229,10 @@ async function send() {
         const r = await App.api.post('/send', target ? { text, mode: 'type', window: target.id } : { text, mode: 'type' });
         txtOk = r.ok;
         if (r.ok) { box.value = ''; grow(); into = into || (r.json && r.json.into); }
-        else App.toast(App.daemonErr(r, 'Couldn’t send. Try again.'), true);
+        else {
+          App.toast(App.daemonErr(r, 'Couldn’t send. Try again.'), true);
+          if (r.status === 409 && /window gone/.test((r.json && r.json.error) || '')) setTarget(null);
+        }
       } catch (e) { App.toast('Can’t reach your laptop.', true); }
     }
     App.emit('sent', { ok: imgOk || txtOk, into });

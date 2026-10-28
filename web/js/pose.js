@@ -27,6 +27,18 @@ import { App } from './app.js';
 import { pack } from './kp-pack.js';
 
 const DIR = './vendor/mediapipe/';
+
+/* The MediaPipe wasm prints its glog/TFLite INFO lines ("INFO: Created TensorFlow Lite XNNPACK delegate
+   for CPU.", "I0000 ...") through console.error, and its glog W lines through console.warn/log. They
+   are not errors: drop those, pass everything else. */
+const NOISE = /^(INFO: |[IW]\d{4} |Graph successfully started running)/;
+if (!console.__wfQuiet) {
+  for (const k of ['error', 'warn', 'log']) {
+    const f = console[k].bind(console);
+    console[k] = (...a) => { if (typeof a[0] === 'string' && NOISE.test(a[0])) return; f(...a); };
+  }
+  console.__wfQuiet = true;
+}
 const ENTRY = 'vision_bundle.mjs';
 const MODEL = 'models/hand_landmarker.task';
 // measured payload = bundle + both wasm builds + float16 model (see MANIFEST)

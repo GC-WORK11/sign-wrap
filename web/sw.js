@@ -12,7 +12,7 @@
  *   API/auth  network-only, never cached (keypoint/bank data must not persist)
  *   everything else same-origin: stale-while-revalidate
  */
-const VERSION = "wf-shell-v36";
+const VERSION = "wf-shell-v37";
 const CACHE = `sign-flow-${VERSION}`;
 
 const SHELL = [

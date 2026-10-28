@@ -20,6 +20,7 @@ import { Skel } from './skeleton.js';
 import { KpLink } from './live.js';
 import { Actions } from './actions.js';
 import { Contribute } from './contribute.js';
+import { Quick, typeAction } from './quick.js';
 
 const sheet = App.el.sheetTeach;
 if (!sheet) throw new Error('teach: #sheet-teach missing');
@@ -33,6 +34,11 @@ sheet.innerHTML = `
   <div class="sheet-body tw-body">
 
     <section class="tw-step" data-step="name">
+      <div class="qa-grid" id="tw-qa" role="group" aria-label="What the sign does"></div>
+      <label class="qa-text" id="tw-qa-text" hidden>
+        <svg class="qa-text-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></svg>
+        <input class="input" id="tw-qa-text-in" type="text" aria-label="Text to type" autocomplete="off" maxlength="200">
+      </label>
       <input class="input" id="tw-name" type="text" placeholder="Name"
              autocomplete="off" autocorrect="off" autocapitalize="characters" maxlength="32" enterkeyhint="next">
       <div class="tw-gloss" id="tw-gloss"></div>
@@ -95,7 +101,8 @@ const nameIn = $('tw-name'), glossPre = $('tw-gloss'), nameErr = $('tw-name-err'
       recDone = $('tw-rec-done'), recBack = $('tw-rec-back'),
       prevEl = $('tw-prev'), pickBtn = $('tw-pick'), actionEl = $('tw-action'),
       bindErr = $('tw-bind-err'), saveBtn = $('tw-save'),
-      doneT = $('tw-done-t'), doneM = $('tw-done-m');
+      doneT = $('tw-done-t'), doneM = $('tw-done-m'),
+      qaHost = $('tw-qa'), qaText = $('tw-qa-text'), qaTextIn = $('tw-qa-text-in');
 
 /* the REC chip mirrors the daemon's capture session, nothing else */
 const setTeaching = v => { W.teaching = v; recEl.classList.toggle('on', v); };
@@ -114,6 +121,7 @@ const W = {
   teaching: false, got: 0, cur: [], front: true,
   library: [],             // gloss set for dupe check
   busy: false,
+  autoName: false,         // the name came from the tapped tile, not the keyboard
 };
 
 function stepEl(name) { return sheet.querySelector(`.tw-step[data-step="${name}"]`); }
@@ -206,7 +214,7 @@ async function startCapture() {
   try {
     W.engine = await Pose.load();
   } catch (e) {
-    recErr.textContent = 'pose model failed: ' + (Pose.error || e.message);
+    recErr.textContent = 'The hand model didn’t load. Reload and try again.';
     return;
   }
   recEl.classList.add('on');
@@ -221,8 +229,45 @@ function stopCapture() {
   stageEl.classList.remove('replay');
 }
 
+/* ---------- step 1 · one-tap grid (quick.js): pick what it does, the name follows ---------- */
+function autoName(v) {
+  if (nameIn.value.trim() && !W.autoName) return;      // never overwrite a name the user typed
+  nameIn.value = String(v || '').slice(0, 32);
+  W.autoName = !!nameIn.value;
+  nameIn.dispatchEvent(new Event('input'));
+}
+function presetAction(a, name) {
+  W.action = a || null;
+  if (a) autoName(name || Actions.describe(a));
+  else if (W.autoName) autoName('');
+}
+qaTextIn.addEventListener('input', () => {
+  const t = qaTextIn.value;
+  presetAction(t.trim() ? typeAction(t) : null, t.trim());
+});
+qaTextIn.addEventListener('keydown', e => { if (e.key === 'Enter' && !nameNext.disabled) nameNext.click(); });
+async function mountGrid() {
+  qaText.hidden = true; qaTextIn.value = '';
+  const r = await Quick.mount(qaHost, {
+    onPick: a => presetAction(a),
+    onText: t => {
+      qaText.hidden = t == null;
+      if (t != null) { qaTextIn.value = t; presetAction(null); setTimeout(() => qaTextIn.focus(), 30); }
+    },
+    onOpenApp: async () => {
+      if (!App.canAct()) { App.emit('unpaired'); Quick.clear(); return; }
+      const a = await Actions.pick({ apps: true, forGloss: W.gloss || undefined });
+      if (!a) { Quick.resetApp(); Quick.clear(); presetAction(null); return; }
+      presetAction(a, Actions.appOf(a) ? Actions.appOf(a).name : Actions.describe(a));
+      Quick.setApp(Actions.describe(a), await Actions.iconFor(a).catch(() => null));
+    },
+  }).catch(() => ({ tiles: 0 }));
+  qaHost.hidden = !r.tiles;
+}
+
 /* ---------- step 1 · name ---------- */
-nameIn.addEventListener('input', () => {
+nameIn.addEventListener('input', e => {
+  if (e.isTrusted) W.autoName = false;
   const g = slug(nameIn.value);
   glossPre.innerHTML = g ? 'gloss&nbsp; <b>' + g + '</b>' : '';
   nameErr.textContent = '';
@@ -252,7 +297,7 @@ nameNext.onclick = async () => {
   if (!r.ok) { nameErr.textContent = App.daemonErr(r, 'Could not start — try again.'); return; }
   setTeaching(true);
   recLead.textContent = W.gloss + ' · 3 takes';
-  recDone.hidden = false; recBack.textContent = 'back';
+  recDone.hidden = false; recBack.textContent = 'Back';
   renderTakebar();
   showStep('record');
   startCapture();
@@ -289,14 +334,23 @@ function buildBind() {
     const cv = document.createElement('canvas');
     Skel.drawTrail(cv, t.frames);
     const meta = document.createElement('div'); meta.className = 'tkv-m';
-    meta.textContent = 'take ' + (i + 1) + ' · ' + t.frames.length + ' frames' +
+    meta.textContent = 'Take ' + (i + 1) + ' · ' + t.frames.length + ' frames' +
       (t.hands ? '' : ' · no hands seen');
     row.append(cv, meta);
     prevEl.appendChild(row);
   });
+  if (W.action) { showAction(W.action); return; }
   actionEl.hidden = true;
   pickBtn.textContent = '@ Pick what ' + W.gloss + ' does';
   saveBtn.disabled = true;
+}
+function showAction(a) {
+  actionEl.hidden = false;
+  actionEl.innerHTML =
+    `<span class="tw-act-n">${esc(Actions.describe(a))}</span>` +
+    `<span class="tw-act-w">${a.tier >= 2 ? 'asks for a yes on your laptop' : 'runs instantly'}</span>`;
+  pickBtn.textContent = 'Change it';
+  saveBtn.disabled = false;
 }
 pickBtn.onclick = async () => {
   // spec §3: the @ picker is a laptop feature — offer pairing instead when offline
@@ -304,12 +358,7 @@ pickBtn.onclick = async () => {
   const a = await Actions.pick({ forGloss: W.gloss });
   if (!a) return;
   W.action = a;
-  actionEl.hidden = false;
-  actionEl.innerHTML =
-    `<span class="tw-act-n">${esc(Actions.describe(a))}</span>` +
-    `<span class="tw-act-w">${a.tier >= 2 ? 'asks for a yes on your laptop' : 'runs instantly'}</span>`;
-  pickBtn.textContent = 'Change it';
-  saveBtn.disabled = false;
+  showAction(a);
 };
 
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g,
@@ -348,7 +397,7 @@ saveBtn.onclick = async () => {
 };
 
 async function finishAdd() {
-  doneT.textContent = 'take added';
+  doneT.textContent = 'Take added';
   doneM.textContent = W.target + ' now has ' + W.got + ' new frame' +
     (W.got === 1 ? '' : 's') + ' to match against.';
   showStep('done');
@@ -365,13 +414,19 @@ async function refreshLibrary() {
 async function open() {
   W.mode = 'teach'; W.target = null;
   W.gloss = ''; W.label = ''; W.takes = []; W.action = null;
-  W.got = 0; W.cur = []; W.need = NEED; W.busy = false;
+  W.got = 0; W.cur = []; W.need = NEED; W.busy = false; W.autoName = false;
+  const grid = mountGrid();
   nameIn.value = ''; glossPre.textContent = ''; nameErr.textContent = '';
   nameNext.disabled = true;
   $('tw-title').textContent = 'Teach a sign';
   showStep('name');
   refreshLibrary();
-  setTimeout(() => nameIn.focus(), 250);
+  // the grid is the first thing to tap; focus the name (and raise the
+  // keyboard) only when the laptop offers no tiles
+  grid.then(() => {
+    if (qaHost.hidden) setTimeout(() => nameIn.focus(), 250);
+    else { const b = qaHost.closest('.sheet-body'); if (b) b.scrollTop = 0; }
+  });
 }
 async function close() {
   stopCapture();
@@ -384,7 +439,7 @@ const Teach = {
     W.mode = 'add'; W.target = gloss;
     W.gloss = gloss; W.label = gloss; W.takes = []; W.action = null;
     W.got = 0; W.cur = []; W.need = 1;
-    $('tw-title').textContent = 'add a take · ' + gloss;
+    $('tw-title').textContent = 'Add a take · ' + gloss;
     const r = await App.api.post('/teach/begin', { name: gloss, takes: 1 }).catch(() => null);
     if (!r || !r.ok) {
       App.toast(App.daemonErr(r, 'Couldn’t teach that — try again'), true);
@@ -393,7 +448,7 @@ const Teach = {
     }
     setTeaching(true);
     recLead.textContent = '';
-    recDone.hidden = true; recBack.textContent = 'cancel';
+    recDone.hidden = true; recBack.textContent = 'Cancel';
     showStep('record');
     startCapture();
   },

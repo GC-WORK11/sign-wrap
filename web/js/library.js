@@ -127,8 +127,8 @@ function startRename(card, s, row) {
   const inp = document.createElement('input');
   inp.className = 'input'; inp.type = 'text';
   inp.value = s.label || s.gloss; inp.maxLength = 48;
-  const ok = document.createElement('button'); ok.className = 'btn-primary lib-b'; ok.textContent = 'save';
-  const no = document.createElement('button'); no.className = 'btn-ghost lib-b'; no.textContent = 'cancel';
+  const ok = document.createElement('button'); ok.className = 'btn-primary lib-b'; ok.textContent = 'Save';
+  const no = document.createElement('button'); no.className = 'btn-ghost lib-b'; no.textContent = 'Cancel';
   rr.append(inp, ok, no); card.appendChild(rr); inp.focus(); inp.select();
   const cleanup = () => { rr.remove(); row.style.display = ''; };
   no.onclick = cleanup;
@@ -144,7 +144,7 @@ function startRename(card, s, row) {
       render(); App.toast('renamed');
     }
     else if (r && r.status === 403) { App.toast('Not connected — scan the code again.', true); cleanup(); }
-    else { App.toast('rename failed', true); ok.disabled = false; ok.textContent = 'save'; }
+    else { App.toast('Rename failed. Try again.', true); ok.disabled = false; ok.textContent = 'Save'; }
   };
   inp.onkeydown = e => { if (e.key === 'Enter') ok.click(); if (e.key === 'Escape') cleanup(); };
 }
