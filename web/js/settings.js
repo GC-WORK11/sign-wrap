@@ -43,11 +43,12 @@ vib.onchange = () => App.store.setItem('wfvib', vib.checked ? '1' : '0');
 // queue and the random id, see contribute.js).
 if (Contribute && Contribute.enabled()) Contribute.setEnabled(false);
 
-// replay seam — the same flag pose.js checks; needs ?replay once or this
-// toggle. Off by default.
+// replay seam — the same flag pose.js checks: dev mode only, this tab only.
+// Off by default.
 if (rep) {
-  rep.checked = App.store.getItem('wfreplay') === '1';
-  rep.onchange = () => App.store.setItem('wfreplay', rep.checked ? '1' : '0');
+  const ss = (() => { try { return sessionStorage; } catch (e) { return null; } })();
+  rep.checked = !!ss && ss.getItem('wfreplay') === '1';
+  rep.onchange = () => { if (ss) { if (rep.checked) ss.setItem('wfreplay', '1'); else ss.removeItem('wfreplay'); } };
 }
 
 App.route('settings', { el: sheet });

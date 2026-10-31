@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""wfd — Flow Composer daemon. Receives text/images/files/sign keypoints
+"""wfd — the Sign-Flow laptop daemon. Receives text/images/files/sign keypoints
 from the phone app, injects them at the laptop cursor, and fires taught
 signs' bound actions. Auth via shared pairing key; the live-sign surface
 is LAN/USB only (never through a tunnel)."""
-import hashlib, hmac, json, math, os, queue, re, secrets, shutil, string, subprocess, sys, tempfile, threading, time, urllib.parse
+import hashlib, hmac, json, math, os, queue, re, secrets, shlex, shutil, string, subprocess, sys, tempfile, threading, time, urllib.parse
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -15,6 +15,10 @@ try:
     import signbank              # W1a pure-python DTW bank — optional
 except ImportError:
     signbank = None
+try:
+    import handshape             # held-shape helpers (endpointer + bank)
+except ImportError:
+    handshape = None
 try:
     import act_iface             # the ActionProvider contract + gate
     import act_linux             # the Linux/X11 provider
@@ -98,6 +102,19 @@ DUP_GAP_MS = int(os.environ.get("WF_DUP_GAP_MS", "550"))
 PALM_SIGN = os.environ.get("WF_PALM_SIGN", "PALM-OPEN")
 NAMASTE_SIGN = os.environ.get("WF_NAMASTE_SIGN", "NAMASTE")
 TEACH_TAKES = int(os.environ.get("WF_TEACH_TAKES", "3"))
+# a live sign counts once the hand has held its shape this long; a Teach
+# take needs a longer, deliberate hold so a pause on the way in is not a take
+LIVE_SETTLE_S = float(os.environ.get("WF_SETTLE_S", "0.18"))
+TEACH_SETTLE_S = float(os.environ.get("WF_TEACH_SETTLE_S", "0.4"))
+# two takes of one sign are the same held shape (handshape distance);
+# the same shape across real recordings stays under ~0.12
+TEACH_SAME_TOL = float(os.environ.get("WF_TEACH_SAME_TOL", "0.2"))
+# a Teach whose page went away (tab closed, phone locked, renderer killed)
+# never posts /teach/end. When its stream has been silent this long and a
+# new stream starts, the Teach is over: the new frames are Go Live, not takes
+TEACH_IDLE_S = float(os.environ.get("WF_TEACH_IDLE_S", "3"))
+# client t_ms is wall-clock ms minus this (see web/js/live.js KpLink.send)
+CLIENT_T_OFFSET = 1.78e12
 
 TERMINAL_CLASSES = (
     "terminal", "konsole", "alacritty", "kitty", "xterm", "st", "wezterm",
@@ -469,12 +486,24 @@ def _inject_worker():
 threading.Thread(target=_inject_worker, daemon=True).start()
 
 
+def _is_terminal(cls):
+    """Linux: is the focused window a terminal? Matched on the WM_CLASS
+    name (not any substring: 'st' is a terminal, 'postman' is not)."""
+    c = (cls or "").lower()
+    if "terminal" in c:
+        return True
+    for t in TERMINAL_CLASSES:
+        if c == t or c.startswith(t + "-") or c.endswith("." + t):
+            return True
+    return False
+
+
 def _paste_keys(cls=None):
     """OS + focused-app aware paste chord."""
     cls = cls if cls is not None else active_window_class()
     if _host() == "macos":
         return "cmd+v"
-    if any(t in cls for t in TERMINAL_CLASSES):
+    if _is_terminal(cls):
         return "ctrl+shift+v"
     return "ctrl+v"
 
@@ -537,8 +566,7 @@ def _paste_chord(cls):
     """The focused app's paste shortcut."""
     if _darwin():
         return None                      # sent via osascript, not xdotool
-    return "ctrl+shift+v" if any(t in cls for t in TERMINAL_CLASSES) \
-        else "ctrl+v"
+    return "ctrl+shift+v" if _is_terminal(cls) else "ctrl+v"
 
 
 def _send_paste_chord(cls):
@@ -551,6 +579,11 @@ def _send_paste_chord(cls):
 
 def type_paste(text):
     cls = active_window_class()
+    if _host() == "linux" and _is_terminal(cls):
+        # terminals have no common paste key (xterm has no ctrl+shift+v and
+        # got a literal ^V); typing the text lands in every one of them
+        type_keystrokes(text)
+        return
     paste_keys = _paste_keys(cls)
     old = act_platform.clip_get() if act_platform is not None else None
 
@@ -643,6 +676,10 @@ def _wfclip_own(path, mime, timeout=WFCLIP_READY_S):
 
 
 def paste_file(path, mime, cls):
+    if _host() == "linux" and _is_terminal(cls):
+        # a terminal gets the file's path, typed (quoted for the shell)
+        type_keystrokes(shlex.quote(path))
+        return
     keys = _paste_keys(cls)
     old = act_platform.clip_get() if act_platform is not None else None
     host = _host()
@@ -856,7 +893,8 @@ LIVE = {"session": None, "listening": False, "ep": None,
         "dup_fires": 0,
         "feed": deque(maxlen=64)}
 TEACH = {"active": False, "name": "", "takes": 0, "got": 0,
-         "label": "", "action": None, "session": None, "frames": []}
+         "label": "", "action": None, "session": None, "frames": [],
+         "holds": [], "added": 0, "reject": None, "reject_frames": None}
 PENDING = {}                    # confirm_id -> {gloss,label,argv,at}
 _cmd_cache = {"key": None, "rows": {}}
 LIVE_POSTS = ("/live/kp", "/live/event", "/live/listen", "/live/mode",
@@ -1553,23 +1591,161 @@ def _word_for(label, gloss):
     return (gloss or "").replace("-", " ").replace("_", " ").strip().lower()
 
 
+def _teach_check(hold):
+    """'ok' | 'different' | 'restart' for a new Teach take with held shape
+    `hold` (None for a moving sign: no shape check)."""
+    if hold is None or handshape is None:
+        return "ok"
+    prev = [h for h in TEACH.get("holds") or [] if h]
+    if not prev:
+        return "ok"
+    if any(handshape.shape_distance(hold, h) <= TEACH_SAME_TOL
+           for h in prev):
+        return "ok"
+    rej = TEACH.get("reject")
+    if rej and handshape.shape_distance(hold, rej) <= TEACH_SAME_TOL:
+        return "restart"
+    return "different"
+
+
+def _teach_lookalike(hold):
+    """The label of another taught sign whose held shape is the same as
+    `hold`, or None. Two signs with one shape can't be told apart, so Live
+    refuses both (QA-11): say so while teaching, before the old sign breaks."""
+    if hold is None or handshape is None or BANK is None:
+        return None
+    best = None
+    for t in getattr(BANK, "templates", []):
+        if t.get("gloss") == TEACH["name"]:
+            continue
+        for smp in t.get("samples") or []:
+            h = smp.get("hold")
+            if not h or (smp.get("travel") or 0.0) >= 1.2:
+                continue
+            d = handshape.shape_distance(hold, h)
+            if d <= TEACH_SAME_TOL and (best is None or d < best[0]):
+                best = (d, t)
+    if best is None:
+        return None
+    t = best[1]
+    return (t.get("label") or "").strip() or t["gloss"]
+
+
+def _teach_add(frames, hold):
+    """Store one Teach take as an exemplar; True when the bank took it."""
+    if not frames:
+        return False
+    try:
+        ok = bool(BANK.add_exemplar(TEACH["name"], frames,
+                                    TEACH["label"], TEACH["action"]))
+    except Exception as e:
+        print(f"[wfd] add_exemplar: {e!r}", flush=True)
+        return False
+    if ok:
+        TEACH["got"] += 1
+        TEACH["added"] = TEACH.get("added", 0) + 1
+        TEACH["frames"].append(frames)
+        TEACH["frames"] = TEACH["frames"][-5:]
+        TEACH.setdefault("holds", []).append(hold)
+    return ok
+
+
+def _teach_drop_session_takes():
+    """Undo the takes this Teach session added (keeps older exemplars)."""
+    n = TEACH.get("added", 0)
+    t = BANK._find(TEACH["name"]) if hasattr(BANK, "_find") else None
+    if t is not None and n:
+        del t["samples"][-min(n, len(t["samples"])):]
+        t["user_samples"] = min(t.get("user_samples", 0), len(t["samples"]))
+        if not t["samples"]:
+            BANK.remove(TEACH["name"])
+    keep = len(TEACH.get("holds") or []) - n
+    TEACH["holds"] = (TEACH.get("holds") or [])[:max(0, keep)]
+    TEACH.update(got=0, added=0, frames=[])
+
+
+def _canon_points(pts):
+    """One hand in view always lands in slot 1. The camera labels each hand
+    Left or Right and the label flickers from frame to frame (and now and
+    then one hand is reported twice); a sign must not depend on it. Two
+    different hands keep their labels."""
+    if handshape is None or len(pts) != 42:
+        return pts
+    tup = [handshape.pt(p) for p in pts]
+    a, b = tup[:21], tup[21:]
+    pa, pb = handshape.present(a), handshape.present(b)
+    if pa and pb:
+        L = max(handshape.palm_length(a), handshape.palm_length(b), 1e-6)
+        gap = sum(math.hypot(p[0] - q[0], p[1] - q[1])
+                  for p, q in zip(a, b)) / 21.0
+        if gap < 0.15 * L:            # the same hand reported twice
+            pa = False
+    if pa and not pb:
+        return [{"x": 0.0, "y": 0.0, "score": 0.0} for _ in range(21)] + \
+            [dict(p) for p in pts[:21]]
+    if pb and not pa:
+        return [{"x": 0.0, "y": 0.0, "score": 0.0} for _ in range(21)] + \
+            [dict(p) for p in pts[21:]]
+    return pts
+
+
+def _held_ms(frames):
+    """ms from the first held frame (client clock) to now: how long the
+    laptop took to act on a held sign once the hand was in its shape.
+    Meaningful when the camera device and the laptop share a clock (the
+    laptop's own browser); None otherwise or for moving signs."""
+    for f in frames or []:
+        if isinstance(f, dict) and f.get("hold"):
+            try:
+                d = now_ms() - (float(f.get("t_ms")) + CLIENT_T_OFFSET)
+            except (TypeError, ValueError):
+                return None
+            return int(d) if 0 <= d < 60000 else None
+    return None
+
+
 def _on_segment(frames, t_ms):
     """A completed sign segment: teach captures it as an exemplar;
     a listening session matches it and routes the bound action."""
     if TEACH["active"]:
-        ok = False
+        ok, reason = False, ""
         if BANK is not None:
-            try:
-                ok = bool(BANK.add_exemplar(TEACH["name"], frames,
-                                            TEACH["label"], TEACH["action"]))
-            except Exception as e:
-                print(f"[wfd] add_exemplar: {e!r}", flush=True)
-        if ok:
-            TEACH["got"] += 1
-            TEACH["frames"].append(frames)
-            TEACH["frames"] = TEACH["frames"][-5:]
+            hold = None
+            if hasattr(BANK, "hold_of"):
+                try:
+                    hold = BANK.hold_of(frames)[0]
+                except Exception:
+                    hold = None
+            verdict = _teach_check(hold)
+            if verdict == "restart":
+                # two takes in a row agree with each other and not with
+                # the first: the first one was the odd one out
+                _teach_drop_session_takes()
+                if _teach_add(TEACH["reject_frames"], TEACH["reject"]):
+                    pass
+            like = None
+            if verdict == "ok" and not TEACH.get("added") and \
+                    not TEACH.get("allow_like"):
+                like = _teach_lookalike(hold)
+            if like:
+                verdict = "like"
+                reason = "like"
+            if verdict in ("ok", "restart"):
+                ok = _teach_add(frames, hold)
+                if not ok:
+                    reason = "short"
+                TEACH["reject"] = TEACH["reject_frames"] = None
+            elif verdict == "like":
+                pass                      # not stored: the old sign keeps working
+            else:
+                TEACH["reject"], TEACH["reject_frames"] = hold, frames
+                reason = "different"
         out = {"teach": {"name": TEACH["name"], "got": TEACH["got"],
                          "takes": TEACH["takes"], "ok": ok}}
+        if reason:
+            out["teach"]["reason"] = reason
+        if reason == "like":
+            out["teach"]["like"] = like
         if TEACH["got"] >= TEACH["takes"]:
             save_bank()
             TEACH["active"] = False
@@ -1588,9 +1764,19 @@ def _on_segment(frames, t_ms):
         return res
     if m is None:
         return res
+    if m.gloss is None:
+        # no taught sign is even a candidate (e.g. a movement that never
+        # settled while only held shapes are taught): nothing to report
+        return res
     def _finite(v):
         return v if (v is None or (isinstance(v, (int, float)) and math.isfinite(v))) else None
+    held = _held_ms(frames)
+    if m.accepted and m.gloss:
+        print(f"[wfd] sign {m.gloss} d={m.dist:.3f}" +
+              (f" held->decided {held} ms" if held is not None else ""),
+              flush=True)
     last = {"gloss": m.gloss, "dist": _finite(m.dist), "at_ms": t_ms,
+            "held_ms": held,
             "accepted": bool(m.accepted),
             "label": getattr(m, "label", "") or "",
             "score": _finite(getattr(m, "score", None)),
@@ -1643,7 +1829,11 @@ def _on_segment(frames, t_ms):
         # composer decides: compositional sequences, profile-bound
         # actions, observe mode — and emits events the feed reports.
         try:
-            evs = OPS.on_match(m, t_ms=t_ms) or []
+            # one clock for the session layer: the daemon's. Frame t_ms is
+            # the client's clock (offset by 1.78e12); mixing the two made a
+            # held prefix resolve on the first /live/state poll, and only
+            # after the window on frame time when nothing polled (QA-8)
+            evs = OPS.on_match(m, t_ms=now_ms()) or []
             if evs:
                 res["events"] = evs
         except Exception as e:
@@ -1899,6 +2089,15 @@ def live_kp(data, client=None):
     now = time.time()
     with LIVE_LOCK:
         sid = data.get("session")
+        if TEACH["active"] and TEACH.get("session") and \
+                (not sid or str(sid)[:64] != TEACH["session"]) and \
+                now - (TEACH.get("seen") or 0) > TEACH_IDLE_S:
+            # the teaching page is gone (QA-12): end its Teach and keep its
+            # takes, so this stream is matched and fires instead of
+            # becoming more takes
+            print(f"[wfd] teach {TEACH['name']}: page gone, ended", flush=True)
+            _teach_close()
+            live_reset()
         if TEACH["active"]:
             # A teach owns its capture stream.  The first kp frame
             # carrying a session id claims it (or /teach/begin pre-binds
@@ -1913,6 +2112,7 @@ def live_kp(data, client=None):
             if sid and owner is None:
                 TEACH["session"] = str(sid)[:64]
                 LIVE["session"] = TEACH["session"]
+            TEACH["seen"] = now
         elif (sid and sid != LIVE["session"]) or \
              (LIVE["seen"] and now - LIVE["seen"] > LIVE_IDLE_S):
             live_reset()
@@ -1928,7 +2128,11 @@ def live_kp(data, client=None):
         if not LIVE["session"]:
             LIVE["session"] = str(sid)[:64] if sid else secrets.token_hex(4)
         LIVE["seen"] = now
-        frame = {"t_ms": t_ms, "points": _apply_aspect(pts, data.get("aspect"))}
+        frame = {"t_ms": t_ms,
+                 "points": _canon_points(_apply_aspect(pts, data.get("aspect")))}
+        if hasattr(LIVE["ep"], "settle_s"):
+            LIVE["ep"].settle_s = TEACH_SETTLE_S if TEACH["active"] \
+                else LIVE_SETTLE_S
         if "hand" in data:
             frame["hand"] = str(data["hand"])
         out = {"ok": True, "session": LIVE["session"]}
@@ -1958,6 +2162,13 @@ def live_kp(data, client=None):
                         "accepted": True, "mode": True,
                         "label": "listening" if LIVE["listening"] else "stopped"}
                 out["mode"] = name
+                if TEACH["active"] and name == PALM_SIGN:
+                    # an open hand is the listen gesture, never a sign:
+                    # say so instead of sitting at 0 takes
+                    out["teach"] = {"name": TEACH["name"],
+                                    "got": TEACH["got"],
+                                    "takes": TEACH["takes"], "ok": False,
+                                    "reason": "palm"}
             elif ev.get("type") == "segment":
                 out.update(_on_segment(ev.get("frames") or [], t_ms))
             elif ev.get("type") == "segment-drop":
@@ -1968,7 +2179,7 @@ def live_kp(data, client=None):
                 out["dropped"] = ev.get("reason")
         if OPS is not None:
             try:
-                OPS.tick(t_ms)      # frame cadence expires held prefixes
+                OPS.tick()          # frame cadence expires held prefixes (daemon clock)
             except Exception:
                 pass
         return 200, out
@@ -2098,6 +2309,27 @@ def _norm_gloss(s):
     return re.sub(r"[^A-Za-z0-9_.\-]+", "-", str(s or "")).strip("-").upper()
 
 
+def _teach_close():
+    """End the active Teach as /teach/end does: keep and save its takes,
+    clear the session, fresh segmenter. Caller holds LIVE_LOCK."""
+    got = TEACH["got"]
+    TEACH.update(active=False, name="", takes=0, got=0, label="",
+                 action=None, session=None, frames=[], holds=[], added=0,
+                 reject=None, reject_frames=None, allow_like=False, seen=0.0)
+    if got:
+        save_bank()
+    _fresh_endpointer()
+
+
+def _fresh_endpointer():
+    """A clean segmenter for a Teach session (and for whatever comes after
+    it). Without this, a movement Go Live left open was closed by the first
+    Teach frame and counted as a take ("too short", or a wrong-shape take)."""
+    if endpointer is not None:
+        LIVE["ep"] = endpointer.Endpointer(palm_sign=PALM_SIGN,
+                                           namaste_sign=NAMASTE_SIGN)
+
+
 def teach_begin(data):
     if BANK is None:
         return 503, {"ok": False, "error": "signbank unavailable"}
@@ -2118,11 +2350,21 @@ def teach_begin(data):
         action = {"argv": row["argv"], "tier": row["tier"],
                   "label": row["label"]}
         label = label or row["label"]
+    prior = []
+    if BANK is not None and hasattr(BANK, "_find"):
+        t = BANK._find(name)
+        if t is not None:
+            prior = [s.get("hold") for s in t.get("samples") or []
+                     if s.get("hold")]
     with LIVE_LOCK:
         TEACH.update(active=True, name=name, takes=takes, got=0,
                      label=label, action=action, frames=[],
+                     holds=prior, added=0, reject=None, reject_frames=None,
+                     allow_like=bool(data.get("allow_like")),
+                     seen=time.time(),
                      session=(str(data["session"])[:64]
                               if data.get("session") else None))
+        _fresh_endpointer()
     return 200, {"ok": True, "name": name, "takes": takes}
 
 
@@ -2131,7 +2373,10 @@ def teach_end(_data):
         was, got, name = TEACH["active"], TEACH["got"], TEACH["name"]
         takes_frames = list(TEACH.get("frames") or [])
         TEACH.update(active=False, name="", takes=0, got=0,
-                     label="", action=None, session=None, frames=[])
+                     label="", action=None, session=None, frames=[],
+                     holds=[], added=0, reject=None, reject_frames=None,
+                     allow_like=False)
+        _fresh_endpointer()
     if got:
         save_bank()
     if not was and not got:

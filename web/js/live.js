@@ -16,6 +16,7 @@
 import { App } from './app.js';
 import { Pose } from './pose.js';
 import { Skel } from './skeleton.js';
+import { detectGap } from './pace.js';
 
 const sheet = App.el.sheetLive;
 if (!sheet) throw new Error('live: #sheet-live missing');
@@ -77,7 +78,7 @@ const video = $('lv-cam'), skel = $('lv-skel'), cover = $('lv-cover'),
 // no helper text on the live view: the badge and the hold bar carry the state
 const HINTS = { control: { idle: '', on: '' }, text: { idle: '', on: '' } };
 let HINT_DEF = HINTS.control.idle;
-const KP_MS = 83;        // ~12 Hz keypoint frames (spec: 10-15 Hz)
+const KP_MS = 83;        // fallback pace without per-frame callbacks (~12 Hz)
 const ST_MS = 167;       // ~6 Hz state poll while open
 
 /* ---------- shared kp stream (teach.js reuses KpLink) ---------- */
@@ -91,6 +92,7 @@ export class KpLink {
     this.onFrame = null; this.onResp = null; this.onStatus = null;
     this.dead = false;    // 404/405 — pre-merge daemon
     this.denied = false;  // 403 — unpaired or proxied
+    this.engErr = false;  // detectFrame threw (reported once per failure)
     this._fake = null;
   }
   start(video, engine, opts) {
@@ -110,7 +112,28 @@ export class KpLink {
       });
       return;
     }
-    this.timer = setInterval(() => this.tick(), KP_MS);
+    this.rvfc = null; this.detMs = 0; this.lastDet = 0;
+    this.running = true;
+    this.schedule();
+  }
+  /* Detection runs on each new camera frame (requestVideoFrameCallback), at
+     most 30 times a second (pace.js). 12 a second on a fixed timer was too
+     slow to catch a sign quickly. */
+  schedule() {
+    if (!this.running) return;
+    const v = this.video;
+    const rv = v && !(this.engine && this.engine.videoless) &&
+      typeof v.requestVideoFrameCallback === 'function';
+    if (rv) this.rvfc = v.requestVideoFrameCallback(() => { this.rvfc = null; if (this.running) { this.paced(); this.schedule(); } });
+    else this.timer = setTimeout(() => { this.timer = null; if (this.running) { this.paced(); this.schedule(); } }, KP_MS);
+  }
+  paced() {
+    const now = performance.now();
+    if (now - this.lastDet < detectGap(this.detMs) - 4) return;
+    this.lastDet = now;
+    this.tick();
+    const dt = performance.now() - now;
+    this.detMs = this.detMs ? this.detMs * 0.8 + dt * 0.2 : dt;
   }
   tick() {
     if (!this.engine) return;
@@ -118,11 +141,19 @@ export class KpLink {
         (!this.video || this.video.readyState < 2)) return;
     const t = performance.now();
     let res;
-    try { res = this.engine.detectFrame(this.video, t); } catch (e) { return; }
+    try { res = this.engine.detectFrame(this.video, t); }
+    catch (e) {
+      /* a dead engine used to fail here silently on every tick: no frames,
+         no takes, no signs. Report it once so the owner can load a fresh one. */
+      if (!this.engErr) { this.engErr = true; if (this.onStatus) this.onStatus('engine'); }
+      return;
+    }
+    this.engErr = false;
     if (!res || !res.points) return;
     if (this.onFrame) this.onFrame(res.points, t);
     this.send(res.points, t);
   }
+  setEngine(engine) { this.engine = engine; this.engErr = false; }
   send(pts, t) {
     if (this.inflight) { this.pend = { pts, t }; return; }
     this.inflight = true;
@@ -153,7 +184,12 @@ export class KpLink {
       });
   }
   stop() {
-    if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    this.running = false;
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    if (this.rvfc != null && this.video && this.video.cancelVideoFrameCallback) {
+      try { this.video.cancelVideoFrameCallback(this.rvfc); } catch (e) {}
+    }
+    this.rvfc = null;
     if (this._fake) { try { this._fake.stop(); } catch (e) {} this._fake = null; }
     this.inflight = false; this.pend = null;
   }
@@ -213,9 +249,7 @@ async function probe() {
   if (r.status === 404 || r.status === 405) {
     S.eng.up = false;
     setBadge('err', 'no live engine');
-    card('Laptop needs an update',
-      'This laptop runs an older version — update it and Go Live works.',
-      [mkBtn('Close', () => App.back())]);
+    card('Laptop needs an update', '', [mkBtn('Close', () => App.back())]);
     return;
   }
   if (!r.ok || !r.json) { engDown(); return; }
@@ -234,6 +268,9 @@ function engDown() {
 
 /* ---------- captions: what you signed, what it did ---------- */
 const pretty = t => String(t || '').replace(/[-_]+/g, ' ').trim().replace(/^./, c => c.toUpperCase());
+// the dev-only match distance (shown with ?dev); it was called but never defined,
+// so every accepted sign threw a ReferenceError out of showMatch()
+const fmt = d => (typeof d === 'number' && isFinite(d)) ? d.toFixed(3) : '–';
 const hostOf = u => { try { return new URL(/^[a-z]+:/i.test(u) ? u : 'https://' + u).host.replace(/^www\./, ''); } catch (e) { return u || 'a page'; } };
 /* a short, human sentence for a bound action (never argv, never ids) */
 function doneText(a) {
@@ -349,7 +386,7 @@ function renderPending(rows) {
     t.textContent = pretty(p.label || p.gloss || 'Action') + ' is waiting for your OK';
     const yes = mkBtn('Run it', async () => {
       const r = await App.api.post('/act/confirm', { id: p.id }).catch(() => null);
-      if (r && r.ok) actFlash('Ran · ' + (p.label || p.gloss)); else App.toast('confirm failed', true);
+      if (r && r.ok) actFlash('Ran · ' + (p.label || p.gloss)); else App.toast('Couldn’t run it', true);
       App.pollState();
     }, true);
     const no = mkBtn('Cancel', async () => {
@@ -414,8 +451,11 @@ function onKpResp(j) {
 }
 
 /* ---------- camera ---------- */
+let bootGen = 0;
 async function boot() {
   if (S.remote) { useLaptop(); return; }
+  const gen = ++bootGen;
+  const live = () => S.open && gen === bootGen;
   /* dev seam first: a loopback kp42 replay service may be
      feeding frames. Probe is ~350 ms once; on a real phone it never
      answers and the camera path runs untouched. */
@@ -439,30 +479,73 @@ async function boot() {
     }
     viewEl.classList.remove('replay');
   } catch (e) { /* probe failed — camera path */ }
-  card('Allow the camera', 'Your browser is asking to use it. Video stays on this device. Only hand points are sent.');
-  try {
-    const c = await Pose.openCamera(video, true);
-    S.stream = c.stream; S.front = c.front;
-    video.classList.toggle('rear', !S.front);
-  } catch (e) { camFail(e); return; }
-  if (!S.open) { stopCam(); return; }
-  card('Getting ready', 'Loading the hand model onto this device. One time only, then it works offline.');
-  try {
-    S.engine = await Pose.load(p => card('Getting ready', 'Loading the hand model onto this device. One time only.'));
-  } catch (e) {
-    card('Hand model unavailable', Pose.error || 'the model files did not load',
-      [mkBtn('Try again', boot, true), laptopBtn()]);
-    setBadge('err', 'no pose');
+  hideCard();
+  viewEl.classList.add('loading');
+  /* the camera and the hand model start together. The model is normally
+     warm already (Pose.warm() runs in idle time once a laptop is connected),
+     so tracking starts with the first camera frames. */
+  const model = Pose.load();
+  model.catch(() => {});
+  // a card only while the browser really is asking for the camera
+  if (!(S.stream && S.stream.active)) {
+    camPermission().then(st => {
+      if (st === 'prompt' && live() && !S.stream) card('Allow the camera', '');
+    });
+    try {
+      const c = await Pose.openCamera(video, true);
+      S.stream = c.stream; S.front = c.front;
+      video.classList.toggle('rear', !S.front);
+    } catch (e) { viewEl.classList.remove('loading'); if (live()) camFail(e); return; }
+  }
+  if (!live()) { stopCam(); return; }
+  hideCard();                                   // the live video shows from here on
+  setBadge('', 'idle');
+  let engine;
+  try { engine = await model; }
+  catch (e) {
+    if (!live()) return;
+    viewEl.classList.remove('loading');
+    modelFail(e);
     return;
   }
-  if (!S.open) { try { S.engine.close(); } catch (e) {} S.engine = null; return; }
-  hideCard();
-  setBadge('', 'idle');
+  if (!live()) return;                          // the shared engine stays warm for the next open
+  viewEl.classList.remove('loading');
+  S.engine = engine;
   S.link.start(video, S.engine, {
     onFrame: (pts, t) => { Skel.draw(skel, pts, { video, mirror: S.front }); feedHold(pts, t); },
     onResp: onKpResp,
-    onStatus: s => { if (s === 'dead') probe(); if (s === 'denied') setBadge('err', 'unpaired'); },
+    onStatus: s => {
+      if (s === 'dead') probe();
+      if (s === 'denied') setBadge('err', 'unpaired');
+      if (s === 'engine') reloadEngine();
+    },
   });
+}
+async function camPermission() {
+  try { return (await navigator.permissions.query({ name: 'camera' })).state; }
+  catch (e) { return ''; }
+}
+function modelFail(e) {
+  card('Hand tracking didn’t start', e && e.name === 'TimeoutError' ? Pose.error : '',
+    [mkBtn('Try again', boot, true), laptopBtn()]);
+  setBadge('err', 'no pose');
+}
+/* the engine failed mid-stream (closed elsewhere, GPU context lost): load a
+   fresh one and keep the same camera and link running */
+async function reloadEngine() {
+  try {
+    const e = await Pose.load();
+    if (S.open && !S.remote && S.engine && !S.engine.videoless) { S.engine = e; S.link.setEngine(e); }
+  } catch (e) {
+    if (S.open) modelFail(e);
+  }
+}
+/* Go Live and Teach share one hand model (pose.js). Closing it here killed
+   detection for whatever opened next, so only the dev replay engine (which
+   owns a polling timer) is closed; the real model stays loaded and warm. */
+function dropEngine() {
+  if (S.engine && S.engine.videoless) { try { S.engine.close(); } catch (e) {} }
+  S.engine = null;
 }
 function stopCam() {
   if (S.stream) for (const t of S.stream.getTracks()) t.stop();
@@ -472,18 +555,15 @@ function stopCam() {
 function camFail(e) {
   const secure = window.isSecureContext;
   if (e && (e.name === 'NotAllowedError' || e.name === 'SecurityError'))
-    card('Camera is blocked',
-      'Allow camera access for this page, then try again. The video never leaves this device; only hand points do.',
-      [mkBtn('Try again', boot, true), laptopBtn()]);
+    card('Camera blocked', '', [mkBtn('Try again', boot, true), laptopBtn()]);
   else if (e && e.name === 'NoAPI' || !secure)
     card('Camera needs a secure connection', '',
       [(laptopBtn() || mkBtn('Try again', boot, true))]);
   else if (e && (e.name === 'NotFoundError' || e.name === 'OverconstrainedError'))
-    card('No camera found', 'This device has no usable camera.',
+    card('No camera found', '',
       [laptopBtn(), laptopBtn() ? null : mkBtn('Close', hideCard)].filter(Boolean));
   else
-    card('Camera failed', (e && e.message) || 'unknown error',
-      [mkBtn('Try again', boot, true), laptopBtn()]);
+    card('Camera didn’t start', '', [mkBtn('Try again', boot, true), laptopBtn()]);
   setBadge('err', 'camera');
 }
 function canLaptop() { return S.eng.up && S.eng.laptopCam; }
@@ -493,17 +573,27 @@ function laptopBtn() {
 async function useLaptop() {
   S.remote = true;
   stopCam(); S.link.stop();
-  if (S.engine) { try { S.engine.close(); } catch (e) {} S.engine = null; }
-  card('Using the laptop camera',
-    'Your laptop is watching its own webcam. Sign at your laptop; the reading below still shows what it sees.',
+  dropEngine();
+  card('Using the laptop camera', '',
     [mkBtn('Back to this camera', () => { S.remote = false; boot(); })]);
   /* no source-switch endpoint exists on wfd.py today — when the rust engine
      reports a laptop cam it already owns the source; we just stop ours. */
 }
 
 /* ---------- orchestration ---------- */
+/* each Go Live starts idle: an open palm starts listening (founder rule 5).
+   Without this the laptop kept listening after Go Live was closed, so the
+   next open within 2 minutes fired signs without the palm (QA-10). */
+function stopListening() { App.api.post('/live/listen', { on: false }).catch(() => {}); }
 async function open() {
   S.open = true;
+  stopListening();
+  /* Teach and Go Live never run at once. A Teach whose page went away
+     (tab closed, phone locked) never ended; its takes are kept and it is
+     ended here, so Go Live's signs fire instead of becoming takes (QA-12) */
+  App.api.get('/live/state').then(r => {
+    if (r && r.ok && r.json && r.json.teach && r.json.teach.active) App.api.post('/teach/end', {}).catch(() => {});
+  }).catch(() => {});
   S.seenAct = undefined; S.seenMatch = undefined;
   S.seenEv.clear(); S.evBase = false; S.matchBase = false; S.words = []; setWords();
   guessEl.textContent = ''; guessEl.classList.add('dim'); actEl.classList.remove('show');
@@ -526,13 +616,15 @@ async function close() {
   document.body.classList.remove('live-open');
   // text mode sets the daemon to observe-only: never leave it that way
   if (S.mode === 'text') App.api.post('/live/mode', { mode: 'live' }).catch(() => {});
+  stopListening();
   S.link.stop();
   clearInterval(S.stT); S.stT = null;
-  if (S.engine) { try { S.engine.close(); } catch (e) {} S.engine = null; }
+  dropEngine();
   stopCam();
   GM.palmT = GM.namT = GM.lastT = 0;
   S.remote = false;
   hideCard();
+  viewEl.classList.remove('loading');
   const x = skel.getContext('2d');
   if (x) x.clearRect(0, 0, skel.width, skel.height);
   setBadge('', 'off');
@@ -589,5 +681,10 @@ addEventListener('pagehide', () => { if (S.open) close(); });
 addEventListener('pageshow', e => {
   if (e.persisted && S.open && !S.remote && (!S.stream || !S.stream.active)) boot();
 });
+
+/* warm the hand model in idle time once a laptop is connected (after
+   pairing), so the first Go Live or Teach tracks at once instead of waiting
+   for a cold load behind a spinner */
+App.on('statusbar', () => { if (App.connected()) Pose.warm(); });
 
 App.route('live', { el: sheet, open, close });

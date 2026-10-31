@@ -3,7 +3,10 @@
 //   import { Pose } from './pose.js'
 //   Pose.load(onProgress?) -> Promise<engine>
 //     - lazy-loads web/vendor/mediapipe/* (fetch-probed, hash-pinned upstreams),
-//       idempotent — concurrent callers share one load.
+//       idempotent — concurrent callers share one load. Rejects after
+//       Pose.loadTimeoutMs (20 s) with a plain error; a retry joins the load.
+//   Pose.warm() — preload in idle time (Go Live calls it once a laptop is
+//     connected) so the first Go Live or Teach tracks at once.
 //     - onProgress({phase:'fetch'|'wasm'|'model', detail}) for honest UI.
 //   engine.detectFrame(source, t_ms) -> result | null
 //     - source: HTMLVideoElement (preferred) or ImageBitmap.
@@ -15,7 +18,9 @@
 //       score 0..1 (0 = absent hand — absent hands are 21 zero points).
 //     - absent-hand frames are real output (the endpointer needs them);
 //       only a repeated timestamp returns null.
-//   engine.close() — release model resources.
+//   engine.close() — release model resources. The engine is shared, so
+//     callers normally keep it warm; after close() the next load() builds
+//     a fresh one and the closed one throws 'hand model closed'.
 //   Pose.state: 'idle'|'loading'|'ready'|'error' ; Pose.error: string|null
 //   Pose.SIZE_BYTES: vendored payload size (34 MB) for honest UI display.
 //
@@ -50,7 +55,12 @@ async function blobModule(resp) {
   try { return await import(u); } finally { URL.revokeObjectURL(u); }
 }
 
-let loading = null;
+let inner = null;        // the one real load in flight (never started twice)
+let shared = null;       // the engine it resolved to, shared by Go Live and Teach
+let warmT = null;        // the scheduled idle preload
+// a load that has not finished by then is reported as an error the user can
+// retry (the load itself keeps going and a retry joins it)
+const LOAD_TIMEOUT_MS = 20000;
 
 /* ---------- kp42 replay seam (devtools, loopback only) ----------
    a development replay service runs at http://127.0.0.1:8877 that
@@ -102,6 +112,98 @@ function replayEngine() {
   };
 }
 
+async function realLoad(onProgress) {
+  try {
+    const prog = (phase, detail) => { try { onProgress && onProgress({ phase, detail }); } catch (e) {} };
+
+    prog('fetch', 'checking the vendored model files');
+    // silent probes first — a 404 fetch is console-quiet, a failed module
+    // import is not. keep the console clean.
+    // NB: wfd.py (stdlib http.server) answers HEAD with 501, which used to
+    // read as "model missing" and blocked every real camera. Probe with a
+    // GET and hang up as soon as the headers arrive (no 8 MB for a check).
+    const probe = async (u) => {
+      const c = new AbortController();
+      try { const r = await fetch(u, { cache: 'no-store', signal: c.signal }); c.abort(); return r; }
+      catch (e) { return null; }
+    };
+    const [bun, mod] = await Promise.all([
+      fetch(DIR + ENTRY, { cache: 'no-store' }),
+      probe(DIR + MODEL),
+    ]);
+    if (!bun.ok) throw new Error('mediapipe bundle missing (run tools/fetch-vendor.sh on the laptop)');
+    if (mod && !mod.ok) throw new Error('hand_landmarker.task missing (run tools/fetch-vendor.sh on the laptop)');
+
+    prog('wasm', 'loading the pose runtime');
+    const m = await blobModule(bun);
+    const R = m.FilesetResolver, L = m.HandLandmarker;
+    if (!R || !L) throw new Error('vendored bundle exports missing');
+    const fs = await R.forVisionTasks(DIR + 'wasm');
+
+    prog('model', 'loading the hand model (on-device, ~8 MB)');
+    let lm = null, err = null;
+    // A software GL (SwiftShader, GPU-less VMs) makes the GPU
+    // delegate ~1 fps; try the CPU (XNNPACK) delegate first there.
+    let soft = false;
+    try {
+      const gl = document.createElement('canvas').getContext('webgl');
+      const ext = gl && gl.getExtension('WEBGL_debug_renderer_info');
+      soft = !!ext && /swiftshader|llvmpipe|software/i.test(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL));
+    } catch (e) {}
+    for (const d of (soft ? ['CPU', 'GPU'] : ['GPU', 'CPU'])) {
+      try {
+        lm = await L.createFromOptions(fs, {
+          baseOptions: { modelAssetPath: DIR + MODEL, delegate: d },
+          runningMode: 'VIDEO', numHands: 2,
+          minHandDetectionConfidence: .4, minHandPresenceConfidence: .4,
+          minTrackingConfidence: .4,
+        });
+        break;
+      } catch (e) { err = e; }
+    }
+    if (!lm) throw err || new Error('hand landmarker failed to initialize');
+
+    let last = -1, closed = false;
+    const engine = {
+      name: 'handlandmarker',
+      get closed() { return closed; },
+      detectFrame(source, tMs) {
+        // a closed landmarker aborts inside the wasm on every call; say so plainly
+        if (closed) throw new Error('hand model closed');
+        const t = tMs == null ? performance.now() : tMs;
+        if (t === last) return null;
+        last = t;
+        const r = lm.detectForVideo(source, t);
+        const lms = r.landmarks || [];
+        // NOTE: an empty detection still yields a frame of 42 zero-score
+        // points — the daemon's endpointer NEEDS hand-absent frames to
+        // close segments when your hands drop. Only a repeat timestamp
+        // returns null (detectForVideo requires strictly-rising ts).
+        const hds = r.handednesses || r.handedness || [];
+        return { points: pack(lms, hds), hands: 2, order: ['Left', 'Right'] };
+      },
+      /* Go Live and Teach share this one engine through load(). Once it is
+         closed, load() must build a new one: handing the closed one out
+         again made every detectFrame abort, so Teach recorded nothing and
+         a reopened Go Live tracked nothing until a page reload. */
+      close() {
+        if (closed) return;
+        closed = true;
+        if (shared === engine) { shared = null; inner = null; Pose.state = 'idle'; }
+        try { lm.close(); } catch (e) {}
+      },
+    };
+    shared = engine;
+    Pose.state = 'ready';
+    return engine;
+  } catch (e) {
+    inner = null;
+    Pose.state = 'error';
+    Pose.error = (e && e.message) || String(e);
+    throw e;
+  }
+}
+
 export const Pose = {
   state: 'idle',
   error: null,
@@ -109,8 +211,11 @@ export const Pose = {
 
   /** Returns a replay engine only for ?replay browsers with the service up. */
   async replay() {
-    // the seam is invisible to everyone else: no flag -> we never probe :8877
-    if (App.store.getItem('wfreplay') !== '1') return null;
+    // the seam is invisible to everyone else: dev mode plus a flag for this
+    // tab only (app.js), else we never probe :8877
+    let on = false;
+    try { on = App.dev && sessionStorage.getItem('wfreplay') === '1'; } catch (e) {}
+    if (!on) return null;
     if (replayProbed === undefined) {
       try {
         const ctl = new AbortController();
@@ -128,88 +233,43 @@ export const Pose = {
     return replayProbed ? replayEngine() : null;
   },
 
-  load(onProgress) {
-    if (loading) return loading;
-    Pose.state = 'loading';
-    Pose.error = null;
-    loading = (async () => {
-      const prog = (phase, detail) => { try { onProgress && onProgress({ phase, detail }); } catch (e) {} };
-
-      prog('fetch', 'checking the vendored model files');
-      // silent probes first — a 404 fetch is console-quiet, a failed module
-      // import is not. keep the console clean.
-      // NB: wfd.py (stdlib http.server) answers HEAD with 501, which used to
-      // read as "model missing" and blocked every real camera. Probe with a
-      // GET and hang up as soon as the headers arrive (no 8 MB for a check).
-      const probe = async (u) => {
-        const c = new AbortController();
-        try { const r = await fetch(u, { cache: 'no-store', signal: c.signal }); c.abort(); return r; }
-        catch (e) { return null; }
-      };
-      const [bun, mod] = await Promise.all([
-        fetch(DIR + ENTRY, { cache: 'no-store' }),
-        probe(DIR + MODEL),
-      ]);
-      if (!bun.ok) throw new Error('mediapipe bundle missing (run tools/fetch-vendor.sh on the laptop)');
-      if (mod && !mod.ok) throw new Error('hand_landmarker.task missing (run tools/fetch-vendor.sh on the laptop)');
-
-      prog('wasm', 'loading the pose runtime');
-      const m = await blobModule(bun);
-      const R = m.FilesetResolver, L = m.HandLandmarker;
-      if (!R || !L) throw new Error('vendored bundle exports missing');
-      const fs = await R.forVisionTasks(DIR + 'wasm');
-
-      prog('model', 'loading the hand model (on-device, ~8 MB)');
-      let lm = null, err = null;
-      // A software GL (SwiftShader, GPU-less VMs) makes the GPU
-      // delegate ~1 fps; try the CPU (XNNPACK) delegate first there.
-      let soft = false;
+  /* idle preload: once a laptop is connected, warm the model in the
+     background so the first Go Live or Teach tracks at once. Only where a
+     camera can open (secure context with a camera present). */
+  warm() {
+    if (warmT || shared || inner) return;
+    if (!window.isSecureContext || !navigator.mediaDevices ||
+        !navigator.mediaDevices.enumerateDevices) return;
+    const go = async () => {
       try {
-        const gl = document.createElement('canvas').getContext('webgl');
-        const ext = gl && gl.getExtension('WEBGL_debug_renderer_info');
-        soft = !!ext && /swiftshader|llvmpipe|software/i.test(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL));
-      } catch (e) {}
-      for (const d of (soft ? ['CPU', 'GPU'] : ['GPU', 'CPU'])) {
-        try {
-          lm = await L.createFromOptions(fs, {
-            baseOptions: { modelAssetPath: DIR + MODEL, delegate: d },
-            runningMode: 'VIDEO', numHands: 2,
-            minHandDetectionConfidence: .4, minHandPresenceConfidence: .4,
-            minTrackingConfidence: .4,
-          });
-          break;
-        } catch (e) { err = e; }
-      }
-      if (!lm) throw err || new Error('hand landmarker failed to initialize');
-
-      let last = -1;
-      const engine = {
-        name: 'handlandmarker',
-        detectFrame(source, tMs) {
-          const t = tMs == null ? performance.now() : tMs;
-          if (t === last) return null;
-          last = t;
-          const r = lm.detectForVideo(source, t);
-          const lms = r.landmarks || [];
-          // NOTE: an empty detection still yields a frame of 42 zero-score
-          // points — the daemon's endpointer NEEDS hand-absent frames to
-          // close segments when your hands drop. Only a repeat timestamp
-          // returns null (detectForVideo requires strictly-rising ts).
-          const hds = r.handednesses || r.handedness || [];
-          return { points: pack(lms, hds), hands: 2, order: ['Left', 'Right'] };
-        },
-        close() { try { lm.close(); } catch (e) {} },
-      };
-      Pose.state = 'ready';
-      return engine;
-    })().catch(e => {
-      Pose.state = 'error';
-      Pose.error = (e && e.message) || String(e);
-      loading = null;
-      throw e;
-    });
-    return loading;
+        const ds = await navigator.mediaDevices.enumerateDevices();
+        if (!ds.some(d => d.kind === 'videoinput')) return;
+      } catch (e) { return; }
+      Pose.load().catch(() => {});
+    };
+    warmT = 'requestIdleCallback' in window
+      ? requestIdleCallback(go, { timeout: 2000 }) : setTimeout(go, 800);
   },
+
+  loadTimeoutMs: LOAD_TIMEOUT_MS,
+
+  /* the shared engine; rejects with a plain message when the files are
+     missing or the load takes longer than Pose.loadTimeoutMs */
+  load(onProgress) {
+    if (shared && !shared.closed) return Promise.resolve(shared);
+    if (!inner) inner = realLoad(onProgress);
+    if (Pose.state !== 'ready') { Pose.state = 'loading'; Pose.error = null; }
+    const p = inner;
+    return new Promise((ok, no) => {
+      const t = setTimeout(() => {
+        Pose.state = 'error';
+        Pose.error = 'It took too long to start. Try again.';
+        no(Object.assign(new Error(Pose.error), { name: 'TimeoutError' }));
+      }, Pose.loadTimeoutMs);
+      p.then(e => { clearTimeout(t); ok(e); }, e => { clearTimeout(t); no(e); });
+    });
+  },
+
 
   /* camera helper shared by live + teach — one front-camera recipe,
      honest errors, no silent fallback to a stream that lies. */

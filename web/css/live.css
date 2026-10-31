@@ -70,6 +70,11 @@ body.dev .lv-rdist:not(:empty), body.dev .lv-why:not(:empty) { display: block; }
 .lv-hold { display: flex; flex-direction: column; align-items: center; gap: 12px; margin-top: 4px; }
 .lv-hold-bar { width: 120px; height: 2px; border-radius: 2px; background: rgba(255, 255, 255, .28); overflow: hidden; }
 .lv-hold-bar i { display: block; height: 100%; width: 0; background: #fff; transition: width .08s linear; }
+/* hand tracking still starting: the live video is already showing; the hold
+   bar sweeps instead of a card over the camera */
+.lv-view.loading .lv-hold-bar i { width: 34% !important; animation: lv-load 1.1s var(--ease-out) infinite; }
+@keyframes lv-load { from { transform: translateX(-110%); } to { transform: translateX(330%); } }
+@media (prefers-reduced-motion: reduce) { .lv-view.loading .lv-hold-bar i { animation: none; width: 100% !important; opacity: .5; } }
 .lv-hint { font-size: 14.5px; color: rgba(255, 255, 255, .82); text-shadow: 0 1px 8px rgba(0, 0, 0, .45); }
 
 .lv-send {

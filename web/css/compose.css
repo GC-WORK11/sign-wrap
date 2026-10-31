@@ -50,7 +50,8 @@
 
 /* one black pill, never tinted: Go Live (white waveform) <-> send (white arrow) */
 .act {
-  position: relative; flex: none; width: 46px; height: 36px; margin: 7px 0; border-radius: 18px;
+  /* 48x48: the smallest tap target (founder rule 23); fits the 50 px input row */
+  position: relative; flex: none; width: 48px; height: 48px; margin: 1px 0; border-radius: 24px;
   background: var(--ink); color: #fff; will-change: transform;
   transition: transform .38s var(--ease-spring), background var(--t-1);
 }
@@ -61,7 +62,7 @@
 .live-btn::after, .go::after { content: ""; position: absolute; inset: -6px -2px; }
 .pill.ready .live-btn, .pill:not(.ready) .go { pointer-events: none; }
 .pill.ready .go { pointer-events: auto; }
-.act-ico { position: absolute; left: 13px; top: 8px; width: 20px; height: 20px; pointer-events: none; overflow: visible; z-index: 1; }
+.act-ico { position: absolute; left: 14px; top: 14px; width: 20px; height: 20px; pointer-events: none; overflow: visible; z-index: 1; }
 .act-ico line { transform-box: fill-box; transform-origin: center; transition: transform .46s var(--ease-spring), opacity .28s ease; }
 .pill.ready .act-ico .b3 { transform: translate(-.5px, 0) scaleY(.875); }
 .pill.ready .act-ico .b1 { transform: translate(3.58px, -3.08px) rotate(45deg) scaleY(2.175); }

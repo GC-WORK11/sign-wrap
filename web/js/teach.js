@@ -60,6 +60,7 @@ sheet.innerHTML = `
       </div>
       <div class="tw-takes" id="tw-takebar"></div>
       <div class="errline" id="tw-rec-err"></div>
+      <button class="btn btn-ghost btn-block" id="tw-rec-same" hidden>Use it anyway</button>
       <div class="tw-foot">
         <button class="btn btn-ghost" id="tw-rec-back">Back</button>
         <button class="btn btn-primary" id="tw-rec-done" disabled>Next</button>
@@ -98,7 +99,7 @@ const nameIn = $('tw-name'), glossPre = $('tw-gloss'), nameErr = $('tw-name-err'
       recLead = $('tw-rec-lead'), stageEl = $('tw-stage'), vid = $('tw-vid'),
       skelC = $('tw-skel'), countEl = $('tw-count'), recEl = $('tw-rec'),
       camErr = $('tw-camerr'), takebar = $('tw-takebar'), recErr = $('tw-rec-err'),
-      recDone = $('tw-rec-done'), recBack = $('tw-rec-back'),
+      recDone = $('tw-rec-done'), recBack = $('tw-rec-back'), recSame = $('tw-rec-same'),
       prevEl = $('tw-prev'), pickBtn = $('tw-pick'), actionEl = $('tw-action'),
       bindErr = $('tw-bind-err'), saveBtn = $('tw-save'),
       doneT = $('tw-done-t'), doneM = $('tw-done-m'),
@@ -152,6 +153,7 @@ function onResp(j) {
       W.takes.push({ frames: W.cur.slice(), hands });
       if (Contribute && Contribute.enabled()) Contribute.add(W.gloss, W.cur);   // opt-in, landmarks only, stays on this phone
       W.cur = [];
+      recErr.textContent = ''; recSame.hidden = true;
       App.buzz(); renderTakebar();
       if (W.got >= W.need) {
         App.api.post('/teach/end', { name: W.gloss, takes: W.got }).catch(() => {});
@@ -162,15 +164,26 @@ function onResp(j) {
         recLead.textContent = 'Again.';
       }
     } else if (t.ok === false) {
-      recErr.textContent = 'That one was too short or had no hands in view. Try again a little slower.';
+      // a shape another sign already uses: neither could fire (QA-11)
+      recSame.hidden = t.reason !== 'like';
+      recErr.textContent = t.reason === 'like' ? 'Same as ' + (t.like || 'another sign') + '. Use another shape.'
+        : t.reason === 'palm' ? 'An open hand starts listening. Use another shape.'
+        : t.reason === 'different' ? 'That looked like a different sign. Do the same one again.'
+        : 'That take was too short. Hold the sign a moment longer.';
       const slot = takebar.children[W.got];
       if (slot) { slot.classList.add('miss'); setTimeout(() => slot.classList.remove('miss'), 2000); }
     }
   }
 }
 function onStatus(s) {
-  if (s === 'dead') recErr.textContent = 'This laptop runs an older wrap — update it and try again.';
+  if (s === 'dead') recErr.textContent = 'This laptop needs an update.';
   if (s === 'denied') recErr.textContent = 'Not connected — scan the code again.';
+  if (s === 'engine') {
+    // the shared hand model failed under us: load a fresh one, keep recording
+    Pose.load().then(e => {
+      if (W.engine && !W.engine.videoless) { W.engine = e; W.link.setEngine(e); }
+    }).catch(() => { recErr.textContent = 'Hand tracking didn’t start. Reload and try again.'; });
+  }
 }
 
 async function startCapture() {
@@ -201,6 +214,8 @@ async function startCapture() {
       return;
     }
   } catch (e) { /* probe failed — camera path */ }
+  const model = Pose.load();                 // in parallel with the camera (usually warm already)
+  model.catch(() => {});
   try {
     const c = await Pose.openCamera(vid, true);
     W.stream = c.stream; W.front = c.front;
@@ -212,9 +227,10 @@ async function startCapture() {
       : 'Camera blocked. Allow camera access to perform the sign.';
   }
   try {
-    W.engine = await Pose.load();
+    W.engine = await model;
   } catch (e) {
-    recErr.textContent = 'The hand model didn’t load. Reload and try again.';
+    recErr.textContent = e && e.name === 'TimeoutError' ? 'Hand tracking took too long to start. Go back and try again.'
+      : 'Hand tracking didn’t start. Reload and try again.';
     return;
   }
   recEl.classList.add('on');
@@ -227,6 +243,10 @@ function stopCapture() {
   if (W.stream) { for (const t of W.stream.getTracks()) t.stop(); W.stream = null; }
   vid.srcObject = null;
   stageEl.classList.remove('replay');
+  // the real hand model is shared with Go Live and stays warm; only the dev
+  // replay engine owns a timer that must stop
+  if (W.engine && W.engine.videoless) { try { W.engine.close(); } catch (e) {} }
+  W.engine = null;
 }
 
 /* ---------- step 1 · one-tap grid (quick.js): pick what it does, the name follows ---------- */
@@ -269,12 +289,12 @@ async function mountGrid() {
 nameIn.addEventListener('input', e => {
   if (e.isTrusted) W.autoName = false;
   const g = slug(nameIn.value);
-  glossPre.innerHTML = g ? 'gloss&nbsp; <b>' + g + '</b>' : '';
+  glossPre.textContent = g;                   // the name as it will be saved
   nameErr.textContent = '';
   nameNext.disabled = true;
   if (!g) return;
-  if (RESERVED.has(g)) { nameErr.textContent = g + ' is the built-in listen / stop gesture. Pick another name.'; return; }
-  if (W.library.some(s => s.gloss === g)) { nameErr.textContent = 'You already have a sign with that name. Add takes to it from Your signs.'; return; }
+  if (RESERVED.has(g)) { nameErr.textContent = 'That name is taken by a built-in sign.'; return; }
+  if (W.library.some(s => s.gloss === g)) { nameErr.textContent = 'You already have a sign with that name.'; return; }
   nameNext.disabled = false;
 });
 nameIn.addEventListener('keydown', e => { if (e.key === 'Enter' && !nameNext.disabled) nameNext.click(); });
@@ -287,11 +307,11 @@ nameNext.onclick = async () => {
   if (!r) { nameErr.textContent = 'Can’t reach your laptop.'; return; }
   if (r.status === 403) { nameErr.textContent = 'Not connected — scan the code again.'; return; }
   if (r.status === 404 || r.status === 405) {
-    nameErr.textContent = 'This laptop runs an older version — update it to teach signs.';
+    nameErr.textContent = 'This laptop needs an update.';
     return;
   }
   if (r.status === 503 || (r.json && r.json.error && /signbank/.test(r.json.error))) {
-    nameErr.textContent = 'This laptop can’t learn signs yet — update wrap on it first.';
+    nameErr.textContent = 'This laptop needs an update.';
     return;
   }
   if (!r.ok) { nameErr.textContent = App.daemonErr(r, 'Could not start — try again.'); return; }
@@ -305,6 +325,7 @@ nameNext.onclick = async () => {
 
 /* ---------- step 2 · record ---------- */
 function renderTakebar() {
+  if (!W.got) recSame.hidden = true;
   takebar.textContent = '';
   const n = W.need || (W.mode === 'add' ? 1 : NEED);
   for (let i = 0; i < n; i++) {
@@ -316,6 +337,16 @@ function renderTakebar() {
   recDone.textContent = W.mode === 'add' ? 'Finish'
     : (W.got >= W.need ? 'Next' : 'Next (' + W.got + '/' + W.need + ')');
 }
+/* "Use it anyway": the user wants this shape for this sign too. Both
+   signs then refuse in Go Live until one is re-taught, which is their
+   call to make. Restart the capture so the next take is kept. */
+recSame.onclick = async () => {
+  recSame.hidden = true; recErr.textContent = '';
+  const r = await App.api.post('/teach/begin', { name: W.gloss, takes: W.need || NEED,
+    label: W.label, allow_like: true }).catch(() => null);
+  if (!r || !r.ok) { recErr.textContent = App.daemonErr(r, 'Could not start — try again.'); return; }
+  setTeaching(true);
+};
 recBack.onclick = async () => {
   if (W.teaching) { await App.api.post('/teach/end', { name: W.gloss }).catch(() => {}); setTeaching(false); }
   if (W.mode === 'add') App.back(); else showStep('name');
@@ -334,8 +365,7 @@ function buildBind() {
     const cv = document.createElement('canvas');
     Skel.drawTrail(cv, t.frames);
     const meta = document.createElement('div'); meta.className = 'tkv-m';
-    meta.textContent = 'Take ' + (i + 1) + ' · ' + t.frames.length + ' frames' +
-      (t.hands ? '' : ' · no hands seen');
+    meta.textContent = 'Take ' + (i + 1) + (t.hands ? '' : ' · no hand');
     row.append(cv, meta);
     prevEl.appendChild(row);
   });
@@ -348,7 +378,7 @@ function showAction(a) {
   actionEl.hidden = false;
   actionEl.innerHTML =
     `<span class="tw-act-n">${esc(Actions.describe(a))}</span>` +
-    `<span class="tw-act-w">${a.tier >= 2 ? 'asks for a yes on your laptop' : 'runs instantly'}</span>`;
+    (a.tier >= 2 ? '<span class="tw-act-w">Asks first</span>' : '');
   pickBtn.textContent = 'Change it';
   saveBtn.disabled = false;
 }
@@ -391,15 +421,14 @@ saveBtn.onclick = async () => {
   }
   doneT.textContent = W.gloss + ' is live';
   const d = Actions.describe(a);
-  doneM.textContent = d + (a.tier >= 2 ? ' · confirm on laptop' : '');
+  doneM.textContent = d;
   showStep('done');
   App.buzz();
 };
 
 async function finishAdd() {
   doneT.textContent = 'Take added';
-  doneM.textContent = W.target + ' now has ' + W.got + ' new frame' +
-    (W.got === 1 ? '' : 's') + ' to match against.';
+  doneM.textContent = '';
   showStep('done');
 }
 $('tw-done-lib').onclick = () => App.nav('signs');

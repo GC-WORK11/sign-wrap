@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 import unittest
 from unittest import mock
 
@@ -123,10 +124,20 @@ class TestMacWindows(_Darwin):
         self.assertEqual(len(calls), 2)
 
     def test_focus_app_name_prefers_open_dash_a(self):
-        with mock.patch.object(wfd, "_run",
-                               return_value=(True, "")) as r:
+        # wfd._run is patched process-wide, and the daemon's worker threads
+        # (inject / act queues fed by other tests) can call it meanwhile
+        # (QA-13: their osascript call became call_args). Record only the
+        # calls made from this thread.
+        me = threading.get_ident()
+        mine = []
+
+        def fake_run(argv, *a, **k):
+            if threading.get_ident() == me:
+                mine.append(list(argv))
+            return True, ""
+        with mock.patch.object(wfd, "_run", side_effect=fake_run):
             self.assertTrue(wfd._mac_focus_window("TextEdit"))
-        self.assertEqual(r.call_args[0][0][:3], ["open", "-a", "TextEdit"])
+        self.assertEqual(mine, [["open", "-a", "TextEdit"]])
 
     def test_active_window_class_uses_frontmost(self):
         with mock.patch.object(wfd, "_osa",

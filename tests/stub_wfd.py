@@ -129,6 +129,12 @@ class H(BaseHTTPRequestHandler):
         if p == "/loadtest":
             with open(os.path.join(HERE, "loadtest.html"), "rb") as f:
                 return self._reply(200, f.read(), "text/html; charset=utf-8")
+        if p == "/reopentest":
+            with open(os.path.join(HERE, "reopen.html"), "rb") as f:
+                return self._reply(200, f.read(), "text/html; charset=utf-8")
+        if p == "/golivetest":
+            with open(os.path.join(HERE, "golive.html"), "rb") as f:
+                return self._reply(200, f.read(), "text/html; charset=utf-8")
         if p == "/bank":
             if self.OLD:
                 return self._reply(404, b"nope")

@@ -8,9 +8,17 @@ import { setEndpoint as setContributeEndpoint } from './contribute.js';
 // arrives once in the URL (?k=), then lives in localStorage
 const store = (() => { try { return localStorage; } catch (e) { return sessionStorage; } })();
 const K = new URLSearchParams(location.search).get('k') || store.getItem('wfk') || '';
-// ?replay opts this browser into the kp42 demo-replay seam (pose.js) — it is
-// sticky in localStorage, so the URL cleans itself.
-if (new URLSearchParams(location.search).has('replay')) store.setItem('wfreplay', '1');
+// developer mode: ?dev once (sticky) shows engine names and dev-only switches
+const DEV = /[?&]dev\b/.test(location.search) || store.getItem('wfdev') === '1';
+// ?replay opts this tab into the recorded-hand replay seam (pose.js). Dev
+// mode only, and only for this tab (sessionStorage): a sticky flag from an
+// older build made every Go Live pull frames from whatever answered on
+// 127.0.0.1:8877 instead of showing the camera, so it is cleared here.
+try { localStorage.removeItem('wfreplay'); } catch (e) {}
+try {
+  if (DEV && new URLSearchParams(location.search).has('replay')) sessionStorage.setItem('wfreplay', '1');
+  if (!DEV) sessionStorage.removeItem('wfreplay');
+} catch (e) {}
 if (K) { store.setItem('wfk', K); if (location.search) history.replaceState(null, '', location.pathname + location.hash); }
 
 // ---------- transport ----------
@@ -334,6 +342,7 @@ on('confirms', renderConfirms);
 export const App = {
   key: K,
   store,
+  dev: DEV,
   api: { get: p => req('GET', p), post: (p, b, h) => req('POST', p, b, h), del: p => req('DELETE', p), put: (p, b) => req('PUT', p, b), upload },
   on, off, emit,
   state, renderStatus, pollState, pollEngine, pollStatus, connected, canAct,
@@ -474,7 +483,6 @@ function raise(el) {
 
 // "My signs" count in the drawer; engine names are developer detail (?dev only)
 const railCount = document.getElementById('rail-count');
-const DEV = /[?&]dev\b/.test(location.search) || store.getItem('wfdev') === '1';
 if (DEV) document.body.classList.add('dev');
 on('statusbar', s => {
   if (railCount) railCount.textContent = s.online && s.paired && s.bankSize ? String(s.bankSize) : '';

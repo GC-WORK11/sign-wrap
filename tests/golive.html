@@ -1,0 +1,111 @@
+<!doctype html>
+<!-- golive — regression harness for "Go Live doesn't work / is slow to start".
+     Drives the real app shell (web/index.html) in an iframe with the real
+     vendored hand model and Chrome's fake camera, against tests/stub_wfd.py:
+       1. an old sticky replay flag is cleared and ?replay does nothing
+          outside dev mode (Go Live must never show someone else's frames)
+       2. once the laptop is connected the hand model loads in idle time,
+          before Go Live is opened
+       3. Go Live: the live video shows with no card over it, and tracking
+          (frames sent to the laptop) starts within 1.5 s of the tap
+       4. a hand model that can't load ends in a clear error with a retry,
+          not an endless spinner
+     Posts /_result?f=golive. Not shipped to users: lives outside web/. -->
+<html><head><meta charset="utf-8"><title>golive regression</title>
+<style>body{font:13px ui-monospace,monospace;padding:18px}iframe{width:420px;height:760px;border:1px solid #ccc}</style>
+</head><body>
+<div id="result">RUNNING</div>
+<pre id="log"></pre>
+<script>
+// an older build left this sticky flag behind; the app must clear it
+localStorage.setItem('wfreplay', '1');
+</script>
+<iframe id="fr" src="/index.html?k=teach-stub-key&replay"></iframe>
+<script>
+const logEl = document.getElementById('log'), resEl = document.getElementById('result');
+const fr = document.getElementById('fr'), win = fr.contentWindow;
+const errs = [], steps = [], kp = { n: 0, first: 0 };
+const log = m => { steps.push(m); logEl.textContent += m + '\n'; };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function until(fn, what, ms = 30000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) { const v = await fn(); if (v) return v; await sleep(25); }
+  throw new Error('timeout: ' + what);
+}
+const $ = id => win.document.getElementById(id);
+win.addEventListener('error', e => errs.push('iframe: ' + e.message));
+
+async function main() {
+  await until(() => win.document.readyState === 'complete' && $('tray-live') && !$('tray-live').hidden,
+              'app boot + laptop connected', 60000);
+  // count what the app really sends to the laptop
+  const real = win.fetch.bind(win);
+  win.fetch = (u, o) => {
+    if (String(u).endsWith('/live/kp') && o && o.method === 'POST') { kp.n++; if (!kp.first) kp.first = Date.now(); }
+    if (String(u).includes('127.0.0.1:8877')) errs.push('probed the replay port outside dev mode');
+    return real(u, o);
+  };
+  log('app booted, laptop connected');
+
+  /* 1. replay flag */
+  if (win.localStorage.getItem('wfreplay') !== null) throw new Error('sticky replay flag not cleared');
+  if (win.sessionStorage.getItem('wfreplay') !== null) throw new Error('?replay honoured outside dev mode');
+  log('replay flag: cleared, ignored outside dev mode');
+
+  /* 2. idle preload after pairing, before any tap */
+  const P = (await win.eval("import('/js/pose.js')")).Pose;
+  await until(() => P.state === 'ready', 'hand model preloaded in idle time', 60000);
+  log('hand model preloaded before Go Live was opened');
+
+  /* 3. Go Live: live video, no card, tracking at once */
+  const t0 = Date.now();
+  $('tray-live').click();
+  let coverSeen = false;
+  const cv = setInterval(() => { if (!$('lv-cover').hidden) coverSeen = true; }, 10);
+  await until(() => { const v = $('lv-cam'); return v.readyState >= 2 && v.videoWidth > 0; }, 'camera playing', 10000);
+  const tCam = Date.now() - t0;
+  await until(() => kp.n >= 3, 'frames sent to the laptop', 10000);
+  const tTrack = kp.first - t0;
+  clearInterval(cv);
+  log('camera playing at ' + tCam + ' ms, tracking frames from ' + tTrack + ' ms');
+  if (coverSeen) throw new Error('a card covered the live video while Go Live started');
+  if (tTrack > 1500) throw new Error('tracking started ' + tTrack + ' ms after the tap (want <= 1500)');
+
+  /* QA-10: closing Go Live stops listening on the laptop, and a reopen
+     starts idle, so a sign never fires without the open palm */
+  const state = async () => (await (await real('/live/state', { headers: { 'X-WF-Key': 'teach-stub-key' } })).json()).listening;
+  await real('/live/listen', { method: 'POST', headers: { 'X-WF-Key': 'teach-stub-key', 'Content-Type': 'application/json' }, body: '{"on":true}' });
+  if (!(await state())) throw new Error('could not set listening for the check');
+  $('lv-x').click();
+  await until(async () => (await state()) === false, 'listening off after Go Live closed', 5000);
+  await real('/live/listen', { method: 'POST', headers: { 'X-WF-Key': 'teach-stub-key', 'Content-Type': 'application/json' }, body: '{"on":true}' });
+  $('tray-live').click();
+  await until(async () => (await state()) === false, 'a reopened Go Live starts idle', 5000);
+  log('closing Go Live stops listening; a reopen starts idle');
+  $('lv-x').click();
+  await sleep(400);
+
+  /* 4. a model that never loads ends in a clear error with a retry */
+  (await P.load()).close();               // drop the warm engine
+  const realFetch = win.fetch;
+  win.fetch = (u, o) => String(u).includes('/vendor/mediapipe/') ? new Promise(() => {}) : realFetch(u, o);
+  P.loadTimeoutMs = 1500;
+  const t1 = Date.now();
+  $('tray-live').click();
+  await until(() => !$('lv-cover').hidden && /didn/.test($('lv-card-t').textContent), 'clear error card', 8000);
+  const btns = [...$('lv-card-b').querySelectorAll('button')].map(b => b.textContent);
+  log('stuck load -> "' + $('lv-card-t').textContent + '" after ' + (Date.now() - t1) + ' ms, buttons: ' + btns.join(', '));
+  if (!btns.includes('Try again')) throw new Error('no retry on the error card');
+  win.fetch = realFetch;
+  $('lv-x').click();
+  finish(errs.length === 0);
+}
+function finish(pass) {
+  const out = { pass, errs, steps, kp };
+  resEl.textContent = pass ? 'GOLIVE PASS' : 'GOLIVE FAIL — ' + (errs[0] || 'see log');
+  fetch('/_result?f=golive', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                               body: JSON.stringify(out) }).catch(() => {});
+}
+main().catch(e => { errs.push(e.message); log('FAIL ' + e.message); finish(false); });
+</script>
+</body></html>

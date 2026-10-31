@@ -53,8 +53,9 @@ Auth: the pairing key is stored in `~/.config/wf/key` (mode 600). The app sends 
 | `bin/wrap` | Bash CLI for Linux and macOS. `ROOT` is resolved with `readlink -f`, so the CLI always runs the copy it lives in. Subcommands: `start pair restart bridge stop status logs send install tunnel open doctor`. `bound_port()` reads the real port from the log. `pair_card()` prints the QR. `doctor` lists the dependencies. |
 | `bin/wf` | Legacy alias. |
 | `server/wfd.py` | The daemon. Config env vars are near the top (`MAX_BODY`, `BODY_CAPS`, `LIVE_*`). `list_windows()` (`wmctrl -lx`). `focus_window()`. Serial inject queue. `type_keystrokes`/`type_paste`. `send_text`. `send_image` (converts to PNG with `convert` on Linux, `sips` on macOS). `stream_upload` (writes to `~/wf-uploads`). `live_reset`. `route_gloss`. `_on_segment` (in Teach mode it stores an exemplar; when listening it matches). `live_kp`. `teach_begin`/`teach_end`. `bank_put`/`bank_delete`. Routes: `do_GET`, `do_POST`, `do_DELETE`. `serve()` tries the port, then the next 11 ports. |
-| `server/endpointer.py` | Motion and hold segmenter. **Tunables are the `Endpointer.__init__` defaults**: `enter_v 1.5`, `exit_v 0.7`, `quiet_s 0.35`, `min_seg_s 0.20`, `max_seg_s 3.0`, `hold_s 0.45`, `hold_v 1.2`, `open_ratio 1.55`, `hold_end_s 0.5`, `min_hold_seg_s 0.6`. `PRESENCE_SCORE 0.25`. wfd builds it with the defaults, so edit the defaults here. |
-| `server/signbank.py` | Personal sign bank. `RESAMPLE_N 32`, `MATCH_BAND 4`, `MIN_POINTS 8`, `MAX_EXEMPLARS 5`. `SignBank.__init__`: `reject_threshold 0.6`, `min_score 0.5`, `shape_dim_weight 0.1`, `still_frac 0.08`. `add_exemplar`, `match`, `save`/`load`. |
+| `server/endpointer.py` | Decides when a sign happened. A sign is the moment the hand **settles** into a shape (fingers, layout and position hold for `settle_s 0.18`, at least `settle_n 3` frames); movements that never settle end on hand gone, quiet or `max_seg_s 3.0`. Palm: `hold_s 0.45`, `hold_v 1.2`, four straight fingers or `open_ratio 1.55`. **Tunables are the `Endpointer.__init__` defaults** (calibrated on real phone-camera landmarks); wfd sets `settle_s` per mode (`WF_SETTLE_S` 0.18 live, `WF_TEACH_SETTLE_S` 0.4 Teach). |
+| `server/handshape.py` | Hand shape helpers shared by the endpointer and the bank: finger layout (position, size and rotation removed) and finger extension (straight 1.1-1.4, curled 0.3-1.05 on real landmarks). |
+| `server/signbank.py` | Personal sign bank. Signs taught as held shapes are matched by held shape (`hold_threshold 0.16`, `hold_margin 0.08`); signs taught as movements by banded DTW (`RESAMPLE_N 32`, `MATCH_BAND 4`, `MIN_POINTS 8`, `reject_threshold 0.6`). `MAX_EXEMPLARS 5`. `add_exemplar`, `match`, `save`/`load`. |
 | `server/teach_train.py` | `verify()` re-matches each take against the others after Teach. It reports results only and never blocks a sign. |
 | `server/signflow_ops.py` | Session and mode semantics (Text, Control, observe). |
 | `server/act_iface.py` | Action contract, risk tiers and the focus guard (`verify_focus`, `run`). |
@@ -69,12 +70,12 @@ Auth: the pairing key is stored in `~/.config/wf/key` (mode 600). The app sends 
 | `web/index.html` | Single-page app shell, including the composer pill. The action button `#act` contains `#tray-live` (Go Live) and `#go` (send). |
 | `web/js/app.js` | `App` core: API client `req()`, `upload()`, routes (`live teach signs laptop settings`), pairing `autoPair`/`pair`. `#tray-live` opens Live. |
 | `web/js/compose.js` | Composer. `updateReady()` sets `.pill.ready`. `@` picker: `setTarget`, `openWinMenu` (calls `GET /windows`). `send()` routes to `/send-file` (video and other files), `/send-image` (images, resized by `squeeze`) or `/send` (text). The window id goes in the `X-WF-Window` header or `window` field. |
-| `web/js/live.js` | Go Live. `KP_MS = 83` (about 12 Hz). Client palm-hold `HOLD = 420` ms. `boot()`. Laptop-camera fallback `useLaptop()`. Text \| Control `setMode()`: Text posts `observe` and adds each recognised word to the composer, Control posts `live` and fires actions. |
+| `web/js/live.js` | Go Live. `KpLink` detects on every new camera frame, at most 30 a second (`MIN_KP_MS 33`), backing off when the model is slow; `KP_MS 83` is the fallback pace. Client palm-hold `HOLD = 420` ms. `boot()`. Laptop-camera fallback `useLaptop()`. Text \| Control `setMode()`: Text posts `observe` and adds each recognised word to the composer, Control posts `live` and fires actions. |
 | `web/js/teach.js` | Teach wizard: one-tap action grid and name (`mountGrid`, quick.js) → record 3 takes → bind (pre-filled from the grid, or `@`) → done. `RESERVED` (PALM-OPEN, NAMASTE), `NEED = 3`, `onResp` (take counting), `buildBind`. |
 | `web/js/quick.js` | The one-tap action tiles (`TILES`). A tile appears only if the laptop reports its tool. |
 | `web/js/pose.js` | Loads the vendored landmarker and packs frames into 42 points. The score falls back to 1 when the landmarker gives no visibility. |
 | `web/js/settings.js`, `laptop.js`, `drawer.js`, `library.js` | Settings (Vibrate on send), laptop pane, side drawer, sign library. |
-| `web/sw.js` | Service worker. **`VERSION`** (`wf-shell-v37`). Bump it on every web change. |
+| `web/sw.js` | Service worker. **`VERSION`** (`wf-shell-v48`). Bump it on every web change. |
 | `web/css/compose.css` | Composer styles, including the `.act` black pill. |
 | `web/vendor/mediapipe/` | Vendored MediaPipe Tasks Vision plus the model (Apache-2.0, see `NOTICE.md` and `MANIFEST`). Do not edit or remove it. |
 | `cloud/contribute/` | Cloudflare Worker scaffold for opt-in landmark samples. **Not deployed, and no endpoint is configured** (`/status` → `contribute_url: ""`). Leave it alone for the demo. |
@@ -192,7 +193,7 @@ curl -s "${H[@]}" localhost:$P/status | head -c 400   # engine, display x11, ban
 | **Image** | `POST /send-image` with the raw bytes. The type is detected from the bytes, JPEG and WEBP are converted to PNG, the image goes on the clipboard via `wfclip.py`, and the daemon presses Ctrl+V. | `curl -s "${H[@]}" -H "Content-Type: image/png" --data-binary @web/icon-192.png localhost:$P/send-image` |
 | **Video or file** | `POST /send-file` streams the upload to `~/wf-uploads/<ts>_<name>` (the name is sanitized), then pastes it as a file. Terminals get the path. | `curl -s "${H[@]}" -H "Content-Type: video/mp4" -H "X-File-Name: clip.mp4" --data-binary @clip.mp4 localhost:$P/send-file` |
 | **Teach** | The UI asks for a name, then calls `POST /teach/begin {name}`. Camera frames stream to `/live/kp`. The endpointer closes a segment, and `_on_segment` stores it as an exemplar (`teach.got`). After 3 takes the UI calls `/teach/end`, which saves the bank and runs `teach_train.verify`. Then comes the one-tap bind grid. | `curl -s "${H[@]}" -X POST localhost:$P/teach/begin -d '{"name":"V"}'`, then `curl -s "${H[@]}" localhost:$P/bank` |
-| **Go Live** | Hold an open palm for about 0.5 s. The client hold (`HOLD 420 ms`) and the endpointer mode event PALM-OPEN start listening. Each sign then becomes a segment, which is matched with DTW and accepted only if `dist <= 0.6`. Palms together (NAMASTE) pause listening. | Logs show `[wfd] mode -> ...` and match lines. `GET /live/state` shows `listening`, `last_match` and `feed`. |
+| **Go Live** | Hold an open palm for about 0.5 s. The client hold (`HOLD 420 ms`) and the endpointer mode event PALM-OPEN start listening. A held sign is caught when the hand settles (about 0.2 s) and matched by its shape; a moving sign by DTW. Palms together (NAMASTE) pause listening. | Logs show `[wfd] mode -> ...` and match lines. `GET /live/state` shows `listening`, `last_match` and `feed`. |
 | **Text \| Control** | A toggle in Live. Text posts `/live/mode {"mode":"observe"}`: recognised words are added to the composer and you tap send. Control posts `{"mode":"live"}`: the sign's bound action runs. The API also accepts `text` and `control`. | `curl -s "${H[@]}" -X POST localhost:$P/live/mode -d '{"mode":"control"}'` |
 | **Quick actions** | The tiles in `quick.js` post `POST /act/run {action:{kind:"builtin",tool:"key.press",args:{keys:"alt+Tab"}}}`. Tier-2 actions (such as Close window) wait for `/act/confirm`. The catalog is at `GET /act`. | `curl -s "${H[@]}" -X POST localhost:$P/act/run -d '{"action":{"kind":"builtin","tool":"key.press","type":"key_press","args":{"keys":"ctrl+l"}}}'` |
 | **Packs** | `GET /packs`, then `POST /packs/install {id:"hello"}`. HELLO and INTRO still need takes; NAMASTE is built in. | `curl -s "${H[@]}" localhost:$P/packs` |
@@ -203,7 +204,7 @@ curl -s "${H[@]}" localhost:$P/status | head -c 400   # engine, display x11, ban
 - Use **3 takes**.
 - Put the camera on a stand in good light, with your hands and chest in frame.
 - **Never teach an open palm.** It is the Live start gesture, and `PALM-OPEN` and `NAMASTE` are reserved (400 from `/teach/begin`).
-- Teach visually distinct shapes: **V**, **fist**, **index point** and **thumbs-up**. Don't teach V and L together.
+- Teach shapes that differ in which fingers are straight: **V**, **fist**, **index point**, **three fingers**. Don't teach point and L, or fist and thumbs-up, together: the thumb is not part of the shape.
 
 ---
 
@@ -211,12 +212,12 @@ curl -s "${H[@]}" localhost:$P/status | head -c 400   # engine, display x11, ban
 
 | Symptom | Cause | Fix / file |
 |---|---|---|
-| Teach shows 0/3 takes and "too short or had no hands" | The hand never moves (an open palm held still is read as the PALM-OPEN mode event, not a sign), or the take is under about 0.67 s (`MIN_POINTS 8` at 12 Hz), or no hand was detected | Bring the hand in, hold the shape 1 s, then drop it. Don't use an open palm. In the log, check for segment lines. If needed, lower `min_hold_seg_s` or `hold_end_s` in the `Endpointer.__init__` defaults. |
+| Teach shows 0/3 takes | An open palm (it is the listen gesture; Teach now says so), a take of a different shape than the first ones (Teach says so), or no hand detected | Bring the hand in, hold the shape about 1 s, then drop it. Don't use an open palm. |
 | No hands detected at all (Live idle, 0 exemplars) | Landmark score of 0 | Already fixed: `pose.js` falls back to score 1. If you see 0 again, check that `PRESENCE_SCORE` (endpointer) and `min_score` (signbank) are not above the scores pose.js sends. |
-| V matched as L or C, or WIGGLE matched as POINT | The shape channel is a per-segment median (`shape_dim_weight 0.1`) and the trajectory is only the hand centroid, so finger motion is averaged away | Teach distinct shapes only (V, fist, point, thumbs-up). Optionally raise `shape_dim_weight` in `signbank.py` a little and re-run `test_signbank`. |
-| Fast signs are cut, or two signs merge into one | Endpointer thresholds | The `Endpointer.__init__` defaults in `endpointer.py`. `max_seg_s` (3.0) force-closes long segments. `hold_end_s` (0.5) closes a segment on a held shape. `exit_v`/`quiet_s` set the quiet end. Sign slowly with a 1 s hold. |
+| L read as point, thumbs-up as fist, V as two fingers together | Held shapes are told apart by which fingers are straight; the thumb and finger spread are not used | Teach shapes that differ in straight fingers: V, fist, point, three fingers. |
+| A sign fires late or not at all | The hand never settles (keeps moving or changing shape), or it was taught before this build (old takes are matched the old way) | Hold the shape still for a moment. Re-teach signs taught on an older build. `wrap logs` prints `sign <NAME> ... held->decided <ms>` for each accepted sign. |
 | An old sign wins over a new one | Old exemplars in `~/.config/wf/signbank.json` (up to 5 per sign) | `DELETE /bank?gloss=NAME`, or back up and move `signbank.json` aside (§3), then re-teach. |
-| Go Live never starts listening | The open palm isn't recognised (openness under `open_ratio 1.55`, or the hand moves more than `hold_v 1.2`) | Spread your fingers, hold still for 0.5 s, keep the palm facing the camera. Tune the `Endpointer.__init__` defaults in `endpointer.py`. |
+| Go Live never starts listening | The open palm isn't recognised (fingers not all straight, or the hand moves more than `hold_v 1.2`), or the hand was already open in view when Go Live started | Spread your fingers, hold still for 0.5 s, palm to the camera. If your hand was already up, close it and open it again. |
 | "That window is closed. Pick another." after a send | The picked window was closed or reopened, so its id is gone. The daemon answers `409 window gone` and types nothing; the phone clears the `@` chip | Tap `@` and pick the window again. See `focus_window` and `WINDOW_GONE` in wfd.py. |
 | "No open windows" in the `@` list | `wmctrl` is missing, or the WM has no EWMH support | `sudo apt install wmctrl`. Check with `wmctrl -lx`. |
 | Multiple spaces collapse with `wrap send` | `text="$*"` joins arguments with single spaces | Quote the text: `wrap send "a  b"`. The composer path keeps spacing exactly. |
@@ -306,8 +307,9 @@ If a sign fails on camera, cut and retake that shot. Don't narrate failures and 
 ## 9. Tests
 
 ```bash
-cd server && python3 -m unittest discover -s tests      # 333 tests, about 15 s; expect "OK" with 3 to 6 skips depending on the session and 1 expected failure
-cd .. && node --test tests/contribute.test.mjs tests/kp-pack.test.mjs   # 10 pass
+cd server && python3 -m unittest discover -s tests      # 382 tests, about 20 s; expect "OK" (11 skips without an X display)
+cd .. && node --test tests/*.test.mjs                  # 68 pass
+tests/run-reopen-ui.sh && tests/run-golive-ui.sh        # browser checks (headless Chrome, fake camera)
 # single module:
 cd server && python3 -m unittest tests.test_endpointer -v
 ```

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """wfclip — multi-target X clipboard owner (stays resident until selection is lost).
 Usage: wfclip.py <file> [mime]
-  image mime -> offers: <mime> bytes + uri-list + gnome-copied-files + path text
+  image mime -> offers: <mime> bytes + uri-list + gnome-copied-files
+                (never the path as text: a text-only app pasted the
+                laptop's temp path into the document)
   other      -> offers: uri-list + gnome-copied-files + path text
 """
 import os, sys, urllib.parse
@@ -40,8 +42,9 @@ PLAIN = d.intern_atom("text/plain")
 STRING = d.intern_atom("STRING")
 MIME_ATOM = d.intern_atom(mime) if is_img else 0
 
+TEXT_TARGETS = () if is_img else (UTF8, PLAIN, STRING)
 offered = [TARGETS, TIMESTAMP] + ([MIME_ATOM] if is_img else []) \
-        + [GNOME_FILES, URI_LIST, UTF8, PLAIN, STRING]
+        + [GNOME_FILES, URI_LIST] + list(TEXT_TARGETS)
 
 win = root.create_window(0, 0, 1, 1, 0, 0, X.InputOnly)
 
@@ -80,7 +83,7 @@ def payload_for(tgt_atom):
         return URI_LIST, (uri + "\r\n").encode()
     if tgt_atom == GNOME_FILES:
         return GNOME_FILES, ("copy\n" + uri + "\n").encode()
-    if tgt_atom in (UTF8, PLAIN, STRING):
+    if tgt_atom in TEXT_TARGETS:      # refused for images (see top)
         return tgt_atom, path.encode()
     return None
 

@@ -126,10 +126,14 @@ import math
 import os
 import tempfile
 
+import handshape
+
 RESAMPLE_N = 32          # matcher.rs RESAMPLE_N
 MATCH_BAND = 4           # matcher.rs MATCH_BAND
 MIN_POINTS = 8           # matcher.rs add_sample_nd / best_nd floor
 MAX_EXEMPLARS = 5        # matcher.rs FIFO cap
+MIN_HOLD = 2             # hold frames that make a held-shape exemplar
+TRAVEL_MIN = 1.2         # palm lengths moved while holding = a moving sign
 HAND_KP = 21             # MediaPipe landmarks per hand
 N_HANDS = 2
 SHAPE_DIMS = HAND_KP * 2 * N_HANDS   # 84
@@ -381,8 +385,17 @@ class SignBank:
 
     def __init__(self, reject_threshold=0.6, min_score=0.5, min_keys=8,
                  shape_dim_weight=0.1, veto_eps=0.05, still_frac=0.08,
-                 space="pixel"):
+                 space="pixel", hold_threshold=0.16, hold_margin=0.08):
         self.reject_threshold = float(reject_threshold)
+        # HELD SHAPES (signs the endpointer caught as a settled hand; see
+        # endpointer.py "settle"): matched on the held shape alone, never
+        # on the trajectory, because the movement into a still sign is
+        # different every time. hold_threshold: max handshape distance to
+        # accept (one finger straight vs curled is 0.25+); hold_margin:
+        # the runner-up sign must be at least this much farther, so two
+        # look-alike signs refuse rather than guess.
+        self.hold_threshold = float(hold_threshold)
+        self.hold_margin = float(hold_margin)
         self.min_score = float(min_score)
         self.min_keys = int(min_keys)
         # per-dim weight of each of the 84 shape channels; ~matches the
@@ -521,16 +534,22 @@ class SignBank:
         gloss = str(gloss).strip()
         if not gloss:
             return False
+        hold, travel = self.hold_of(frames)
         traj, shape, npts, _dom = self.prep(frames)
-        if npts < MIN_POINTS or not traj:
+        # a held shape is a complete exemplar on its own: a sign formed in
+        # place has no trajectory to speak of
+        if hold is None and (npts < MIN_POINTS or not traj):
             return False
+        if not traj:
+            traj = [(0.0, 0.0)] * RESAMPLE_N
         t = self._find(gloss)
         if t is None:
             t = {"gloss": gloss, "label": label or "", "tier": 0,
                  "action": None, "user_samples": 0, "samples": []}
             self.templates.append(t)
         t["samples"].append({"traj": [[p[0], p[1]] for p in traj],
-                             "shape": shape})
+                             "shape": shape, "hold": hold,
+                             "travel": round(travel, 4)})
         t["user_samples"] = t.get("user_samples", 0) + 1
         while len(t["samples"]) > MAX_EXEMPLARS:
             t["samples"].pop(0)
@@ -576,14 +595,70 @@ class SignBank:
 
     # -- matching ----------------------------------------------------
 
-    def _score(self, frames):
-        """Scoring without the accept gate. None = the refusal cases
+    # -- held shapes ---------------------------------------------------
+
+    @staticmethod
+    def hold_of(frames):
+        """(held-shape descriptor | None, travel in palm lengths) of the
+        frames the endpointer marked {"hold": True}."""
+        fr = [f for f in (frames or []) if isinstance(f, dict)]
+        hf = [f for f in fr if f.get("hold")]
+        if len(hf) < MIN_HOLD:
+            return None, 0.0
+        d = handshape.descriptor(hf)
+        if d is None:
+            return None, 0.0
+        return d, handshape.rigid_travel(fr, d)
+
+    @staticmethod
+    def is_static(t):
+        """A sign taught as a held shape (most takes held still) is matched
+        by shape; one taught as a movement (no hold, or the held shape
+        travelled) by its trajectory."""
+        s = t.get("samples") or []
+        held = sum(1 for x in s if x.get("hold") and
+                   (x.get("travel") or 0.0) < TRAVEL_MIN)
+        return held * 2 > len(s)
+
+    def _match_held(self, q):
+        """Best static sign for held shape q, or None (no static signs)."""
+        rows = []
+        for t in self.templates:
+            if not self.is_static(t):
+                continue
+            ds = [handshape.shape_distance(q, s["hold"])
+                  for s in t["samples"] if s.get("hold")]
+            if ds:
+                rows.append((min(ds), t))
+        if not rows:
+            return None
+        rows.sort(key=lambda r: r[0])
+        d1, t1 = rows[0]
+        d2, t2 = rows[1] if len(rows) > 1 else (INF, None)
+        near = d1 <= self.hold_threshold
+        clear = (d2 - d1) >= self.hold_margin
+        reason = "ok" if near and clear else \
+            ("threshold" if not near else "margin")
+        return MatchResult(gloss=t1["gloss"], dist=d1,
+                           accepted=near and clear,
+                           second_gloss=t2["gloss"] if t2 else None,
+                           margin=d2 - d1, score=1.0 / (1.0 + d1),
+                           label=t1.get("label", ""),
+                           action=t1.get("action"),
+                           tier=t1.get("tier", 0), reason=reason,
+                           traj_gloss=None, shape_gloss=t1["gloss"])
+
+    def _score(self, frames, only=None):
+        """Scoring without the accept gate. `only`: optional predicate on
+        templates (match() keeps held-shape signs out of the trajectory
+        matcher). None = the refusal cases
         (thin query, empty bank) matcher encodes as Option::None.
         Else a dict: best/second (gloss,dist) on the FUSED channel plus
         each channel's own argmin and the winner's traj distance (the
         veto needs the tie band, not just the argmin name)."""
         traj, shape, npts, _dom = self.prep(frames)
-        if npts < MIN_POINTS or not traj or not self.templates:
+        tpls = [t for t in self.templates if only is None or only(t)]
+        if npts < MIN_POINTS or not traj or not tpls:
             return None
         w_s = self.shape_dim_weight
         w_traj = 2.0
@@ -591,7 +666,7 @@ class SignBank:
         traj_d = []
         fused_d = []
         shape_d = []
-        for t in self.templates:
+        for t in tpls:
             bt = bf = bs = INF
             for s in t["samples"]:
                 d_t = _dtw_add(traj, s["traj"], MATCH_BAND, 0.0)
@@ -635,25 +710,53 @@ class SignBank:
             traj_d.append(bt)
             fused_d.append(bf)
             shape_d.append(bs)
-        order = sorted(range(len(self.templates)),
+        order = sorted(range(len(tpls)),
                        key=lambda i: fused_d[i])
         bi = order[0]
         t_min = min(range(len(traj_d)), key=lambda i: traj_d[i])
         s_min = min(range(len(shape_d)), key=lambda i: shape_d[i])
-        return {"gloss": self.templates[bi]["gloss"], "dist": fused_d[bi],
-                "second_gloss": (self.templates[order[1]]["gloss"]
+        return {"gloss": tpls[bi]["gloss"], "dist": fused_d[bi],
+                "second_gloss": (tpls[order[1]]["gloss"]
                                  if len(order) > 1 else None),
                 "second": fused_d[order[1]] if len(order) > 1 else INF,
-                "traj_gloss": self.templates[t_min]["gloss"],
+                "traj_gloss": tpls[t_min]["gloss"],
                 "traj_d": traj_d[t_min], "traj_d_winner": traj_d[bi],
-                "shape_gloss": self.templates[s_min]["gloss"]}
+                "shape_gloss": tpls[s_min]["gloss"]}
 
     def match(self, frames, consensus=False):
-        """Score a performed segment. accepted = best_d <= threshold AND
+        """Score a performed segment.
+
+        A segment with held frames (the endpointer's settle) is matched
+        by its held shape against signs taught as held shapes; if it moved
+        while holding (a swipe), moving signs get the first try. Anything
+        else goes to the trajectory matcher, which only sees signs taught
+        as movements. Trajectory accept = best_d <= threshold AND
         traj-veto (and full channel consensus when consensus=True).
         gloss/dist/second/margin are always populated when the bank and
         query are valid — rejected results still report the read."""
-        sc = self._score(frames)
+        q, travel = self.hold_of(frames)
+        if q is not None:
+            held = self._match_held(q)
+            moving = None
+            if travel >= TRAVEL_MIN or held is None or not held.accepted:
+                moving = self._match_traj(frames, consensus)
+            if travel >= TRAVEL_MIN and moving is not None and \
+                    moving.accepted:
+                return moving
+            if held is not None and held.accepted:
+                return held
+            if moving is not None and moving.accepted:
+                return moving
+            if held is not None:
+                return held
+            if moving is not None and moving.gloss is not None:
+                return moving
+            return MatchResult(reason="empty-bank" if not self.templates
+                               else "no-match")
+        return self._match_traj(frames, consensus)
+
+    def _match_traj(self, frames, consensus=False):
+        sc = self._score(frames, only=lambda t: not self.is_static(t))
         if sc is None:
             reason = "empty-bank" if not self.templates else "thin-query"
             return MatchResult(reason=reason)
@@ -787,6 +890,8 @@ class SignBank:
             "shape_dim_weight": self.shape_dim_weight,
             "veto_eps": self.veto_eps,
             "still_frac": self.still_frac,
+            "hold_threshold": self.hold_threshold,
+            "hold_margin": self.hold_margin,
             "templates": [
                 {"gloss": t["gloss"], "label": t.get("label", ""),
                  "tier": t.get("tier", 0), "action": t.get("action"),
@@ -796,7 +901,9 @@ class SignBank:
                       # NaN is not valid JSON — None marks unobserved dims
                       "shape": (None if s.get("shape") is None else
                                 [v if math.isfinite(v) else None
-                                 for v in s["shape"]])}
+                                 for v in s["shape"]]),
+                      "hold": s.get("hold"),
+                      "travel": s.get("travel", 0.0)}
                      for s in t["samples"]]}
                 for t in self.templates],
         }
@@ -824,7 +931,9 @@ class SignBank:
                 shape_dim_weight=d.get("shape_dim_weight", 0.1),
                 veto_eps=d.get("veto_eps", 0.05),
                 still_frac=d.get("still_frac", 0.08),
-                space=d.get("space", "pixel"))
+                space=d.get("space", "pixel"),
+                hold_threshold=d.get("hold_threshold", 0.16),
+                hold_margin=d.get("hold_margin", 0.08))
         for t in d.get("templates") or []:
             if not isinstance(t, dict):
                 continue
@@ -833,12 +942,19 @@ class SignBank:
                 raw_samples = [t]            # a lone exemplar dict
             samples = []
             for s in raw_samples or []:
+                hold, travel = None, 0.0
                 if isinstance(s, dict):
                     traj_in = s.get("traj") or []
                     shape = s.get("shape")
                     if shape is not None:
                         shape = [(float(v) if v is not None else NAN)
                                  for v in shape]
+                    if isinstance(s.get("hold"), dict):
+                        hold = s["hold"]
+                    try:
+                        travel = float(s.get("travel") or 0.0)
+                    except (TypeError, ValueError):
+                        travel = 0.0
                 elif isinstance(s, (list, tuple)):
                     # rust/ref sample: a bare resampled trajectory —
                     # no shape channel was ever captured for it.
@@ -851,7 +967,8 @@ class SignBank:
                         traj.append((float(p[0]), float(p[1])))
                     except (TypeError, ValueError, IndexError, KeyError):
                         continue     # a malformed point drops, not the file
-                samples.append({"traj": traj, "shape": shape})
+                samples.append({"traj": traj, "shape": shape,
+                                "hold": hold, "travel": travel})
             gloss = str(t.get("gloss") or t.get("name") or "")
             if not gloss:
                 continue

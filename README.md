@@ -277,13 +277,13 @@ The same commands exist on every OS (`bin/wrap` on Linux and macOS, `server/wrap
 | `wrap install` / `wrap open` | Build and install, or launch, the optional Android app |
 | `wrap stop` | Stop the daemon and any tunnel |
 
-Set `WF_PORT` to use another port, for example `WF_PORT=8800 wrap start`. Taught signs and bindings live in `~/.config/wf/`. Logs and pid files are written to the repo folder and are gitignored.
+Set `WF_PORT` to use another port, for example `WF_PORT=8800 wrap start`. Taught signs, bindings, the log and the pid file live in `~/.config/wf/` (`wfd.log`, `wfd.pid`; set `WF_STATE_DIR` to move them). `wrap logs` shows the log.
 
 ## Tests
 
 ```bash
 cd server && python3 -m unittest discover -s tests
-node --test tests/contribute.test.mjs tests/kp-pack.test.mjs
+node --test tests/*.test.mjs
 ```
 
 The Python suite covers the macOS and Windows backends with mocked system calls, so it runs on any OS.

@@ -1,0 +1,87 @@
+<!doctype html>
+<!-- reopen — regression harness for "Teach never starts".
+     Drives the real app shell (web/index.html) in an iframe with the real
+     hand model and Chrome's fake camera, against tests/stub_wfd.py:
+       Go Live -> close -> Teach -> close -> Go Live
+     and counts the /live/kp frames each step sends. Before the fix, closing
+     Go Live closed the shared hand model, every later detectFrame aborted,
+     and Teach and the second Go Live sent nothing. Posts /_result?f=reopen.
+     Not shipped to users: lives outside web/. -->
+<html><head><meta charset="utf-8"><title>reopen regression</title>
+<style>body{font:13px ui-monospace,monospace;padding:18px}iframe{width:420px;height:760px;border:1px solid #ccc}</style>
+</head><body>
+<div id="result">RUNNING</div>
+<pre id="log"></pre>
+<iframe id="fr" src="/index.html?k=teach-stub-key"></iframe>
+<script>
+const logEl = document.getElementById('log'), resEl = document.getElementById('result');
+const fr = document.getElementById('fr'), win = fr.contentWindow;
+const errs = [], steps = [], kp = {};
+let phase = 'boot';
+const log = m => { steps.push(m); logEl.textContent += m + '\n'; };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function until(fn, what, ms = 30000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) { const v = await fn(); if (v) return v; await sleep(100); }
+  throw new Error('timeout: ' + what);
+}
+const $ = id => win.document.getElementById(id);
+win.addEventListener('error', e => errs.push('iframe: ' + e.message));
+
+/* count what the app really sends: every /live/kp POST, per step */
+function hookFetch() {
+  const real = win.fetch.bind(win);
+  win.fetch = (u, o) => {
+    if (String(u).endsWith('/live/kp') && o && o.method === 'POST') kp[phase] = (kp[phase] || 0) + 1;
+    return real(u, o);
+  };
+}
+async function frames(name, need, ms) {
+  phase = name;
+  await until(() => (kp[name] || 0) >= need, name + ': ' + need + ' hand frames sent', ms);
+  log(name + ': ' + kp[name] + ' frames sent');
+}
+
+async function main() {
+  await until(() => win.document.readyState === 'complete' && $('tray-live') && !$('tray-live').hidden,
+              'app boot + laptop connected');
+  hookFetch();
+  log('app booted');
+
+  $('tray-live').click();
+  await frames('live-1', 5, 45000);            // first open loads the model
+  $('lv-x').click();
+  phase = 'closed';
+  await sleep(600);
+
+  $('tray-teach').click();
+  await until(() => !$('sheet-teach').hidden, 'teach sheet');
+  $('tw-name').value = 'reopen test';
+  $('tw-name').dispatchEvent(new win.Event('input', { bubbles: true }));
+  await until(() => !$('tw-name-next').disabled, 'name accepted');
+  phase = 'teach';
+  $('tw-name-next').click();
+  await frames('teach', 5, 20000);
+
+  const P = await win.eval("import('/js/pose.js')");
+  const eng = await P.Pose.load();
+  try { eng.detectFrame($('tw-vid'), win.performance.now() + 7); log('shared hand model still detects'); }
+  catch (e) { throw new Error('shared hand model throws after Go Live closed: ' + (e && e.message)); }
+
+  $('tw-x').click();
+  phase = 'closed';
+  await sleep(600);
+  $('tray-live').click();
+  await frames('live-2', 5, 20000);
+  $('lv-x').click();
+  finish(errs.length === 0);
+}
+function finish(pass) {
+  const out = { pass, errs, steps, kp };
+  resEl.textContent = pass ? 'REOPEN PASS' : 'REOPEN FAIL — ' + (errs[0] || 'see log');
+  fetch('/_result?f=reopen', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                               body: JSON.stringify(out) }).catch(() => {});
+}
+main().catch(e => { errs.push(e.message); log('FAIL ' + e.message + ' kp=' + JSON.stringify(kp)); finish(false); });
+</script>
+</body></html>
